@@ -1,0 +1,49 @@
+# ==============================================================================
+# mac-health .gitignore — Swift Package Manager & macOS Environment
+# ==============================================================================
+
+# Compiled Binaries & Release Packages
+/mac-health
+*.dmg
+*.app/
+*.o
+*.dylib
+*.dSYM/
+*.out
+
+# Swift Package Manager Build Artifacts
+.build/
+Packages/
+Package.resolved
+Package.pins
+
+# Xcode & Apple Developer Toolchains
+xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcuserstate
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM.zip
+
+# macOS System & Metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Editor & IDE Caches
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+
+# Local Environment & Logs
+*.log
+.system_generated/
+tmp/
