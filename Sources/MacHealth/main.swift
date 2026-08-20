@@ -134,14 +134,14 @@ final class UniversalGovernor {
     static let rules: [GovernanceRule] = [
         GovernanceRule(
             category: "AI Agents & LLM Runtimes",
-            patterns: ["claude", "agy", "antigravity", "ollama", "node", "python", "python3", "bun"],
+            patterns: ["claude", "agy", "antigravity", "codex", "ollama", "node", "python", "python3", "bun"],
             niceLevel: 15,
             backgroundQoS: true,
             throttleDiskIO: true
         ),
         GovernanceRule(
             category: "Compilers & Heavy Toolchains",
-            patterns: ["swiftc", "clang", "clang++", "rustc", "xcodebuild", "ld64", "swift-frontend"],
+            patterns: ["swiftc", "clang", "clang++", "rustc", "xcodebuild", "ld64", "swift-frontend", "swift-build", "swift-driver"],
             niceLevel: 10,
             backgroundQoS: true,
             throttleDiskIO: true
@@ -755,6 +755,12 @@ final class ProactiveSentinel {
                 }
             }
             let isThrottled = cpuSpeedLimit < 100
+            // pmset only reports hard throttling; ProcessInfo surfaces the OS
+            // thermal pressure level well before the speed limit drops (fans
+            // maxed, die near Tjmax), which is when shedding load actually
+            // prevents the stall instead of reacting to it.
+            let thermalState = ProcessInfo.processInfo.thermalState
+            let thermalPressure = thermalState == .serious || thermalState == .critical
             
             // Check for WindowServer latency elevation or stall
             if !wsMetrics.isResponsive || wsMetrics.latencyMs > 250.0 {
@@ -773,10 +779,12 @@ final class ProactiveSentinel {
                 consecutiveSlowWS = 0
             }
             
-            // If thermal throttling kicks in, auto-pace heavy toolchains
-            if isThrottled {
+            // If thermal throttling or serious thermal pressure kicks in,
+            // auto-pace heavy toolchains
+            if isThrottled || thermalPressure {
                 let timestamp = Formatter.timeString(Date())
-                print("[\(timestamp)] \(Formatter.yellow)▲ Thermal Throttling Detected → Auto-pacing heavy compilers & agents...\(Formatter.reset)")
+                let reason = isThrottled ? "CPU Speed Limit \(cpuSpeedLimit)%" : "Thermal Pressure \(thermalState == .critical ? "CRITICAL" : "Serious")"
+                print("[\(timestamp)] \(Formatter.yellow)▲ Thermal Event (\(reason)) → Auto-pacing heavy compilers & agents...\(Formatter.reset)")
                 UniversalGovernor.paceAll(verbose: false)
             }
             
