@@ -10,7 +10,7 @@ A high-performance, native Swift CLI utility and proactive background sentinel t
 - **GPU Stability & Hardware Mux Audit**: Inspects discrete vs. dynamic GPU multiplexing (`gpuswitch`) and scans `/Library/Logs/DiagnosticReports/` for panics, `.gpuRestart`, `.spin`, and shutdown stalls across 24-hour windows.
 - **Kernel & Extension Integrity**: Audits loaded kernel extensions (`kmutil`) for legacy, crash-prone third-party kexts (e.g. `DisableTurboBoost`).
 - **Battery Health & Sleep Timers**: Evaluates battery condition degradation (`Service Recommended`) and validates display vs. system sleep timer coherency to prevent sleep-wake race conditions.
-- **Universal Resource Governor**: Automatically paces heavy background AI agents (`claude`, `agy`, `antigravity`, `node`), compilers (`swiftc`, `clang`, `xcodebuild`), and indexers (`mdworker`, `rg`) using non-destructive background QoS (`taskpolicy -b -d`) and `renice +15`.
+- **Universal Resource Governor**: Automatically paces heavy background AI agents (`claude`, `agy`, `antigravity`, `node`), compilers (`swiftc`, `clang`, `xcodebuild`), and indexers (`mdworker`, `rg`) using non-destructive background QoS (`taskpolicy -b`, which includes throttled disk I/O) and `renice +15`.
 - **Proactive Sentinel Daemon**: A lightweight background sentinel service (PID managed via `LaunchAgent`) that continuously monitors `WindowServer` latency and thermal throttling, automatically shedding system contention to keep interactive UI responsive and prevent panics.
 
 ---

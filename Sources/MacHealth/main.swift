@@ -176,7 +176,11 @@ final class UniversalGovernor {
         
         for rule in rules {
             for pattern in rule.patterns {
-                let pgrepCmd = "pgrep -f '\(pattern)' 2>/dev/null"
+                // -x: exact process-name match. A substring -f match hits unrelated
+                // processes whose command line merely contains the pattern
+                // (e.g. 'find' → findmylocateagent, 'node' → other apps' bundled node)
+                // as well as the transient shell running pgrep itself.
+                let pgrepCmd = "pgrep -x '\(pattern)' 2>/dev/null"
                 let pidsStr = Shell.run(pgrepCmd).output
                 let pids = pidsStr.components(separatedBy: .whitespacesAndNewlines)
                     .compactMap { Int($0) }
@@ -189,10 +193,9 @@ final class UniversalGovernor {
                     let procName = URL(fileURLWithPath: commOut).lastPathComponent
                     
                     if rule.backgroundQoS {
+                        // DARWIN_BG (-b) already includes throttled disk I/O; taskpolicy
+                        // does not support applying -d to an existing pid.
                         Shell.run("taskpolicy -b -p \(pid) 2>/dev/null")
-                    }
-                    if rule.throttleDiskIO {
-                        Shell.run("taskpolicy -d -p \(pid) 2>/dev/null")
                     }
                     Shell.run("renice +\(rule.niceLevel) -p \(pid) 2>/dev/null")
                     
@@ -207,7 +210,7 @@ final class UniversalGovernor {
                     
                     if verbose {
                         print("  \(Formatter.green)✓\(Formatter.reset) Paced PID \(Formatter.bold)\(pid)\(Formatter.reset) (\(item.name)) → [\(rule.category)]")
-                        print("    ↳ Priority: \(Formatter.yellow)nice +\(rule.niceLevel)\(Formatter.reset) | QoS: \(Formatter.cyan)\(item.qos)\(Formatter.reset) | Disk I/O: \(Formatter.blue)Throttled\(Formatter.reset)")
+                        print("    ↳ Priority: \(Formatter.yellow)nice +\(rule.niceLevel)\(Formatter.reset) | QoS: \(Formatter.cyan)\(item.qos)\(Formatter.reset)\(rule.backgroundQoS ? " | Disk I/O: \(Formatter.blue)Throttled (BG policy)\(Formatter.reset)" : "")")
                     }
                 }
             }
@@ -376,9 +379,9 @@ final class MacHealthAuditor {
         
         let lines = logsOut.components(separatedBy: "\n").filter { !$0.isEmpty }
         for (idx, line) in lines.enumerated() {
-            let parts = line.components(separatedBy: " ")
-            if parts.count >= 2, let mtime = Double(parts[0]) {
-                let filePath = parts[1]
+            // Split on the first space only — report filenames can contain spaces.
+            if let sep = line.firstIndex(of: " "), let mtime = Double(line[..<sep]) {
+                let filePath = String(line[line.index(after: sep)...])
                 let ageSeconds = now - mtime
                 let ageHours = ageSeconds / 3600.0
                 
@@ -717,6 +720,9 @@ final class ProactiveSentinel {
     }
     
     static func runDaemon(intervalSec: UInt32 = 5, verbose: Bool = true) {
+        // Under launchd, stdout is redirected to a file and becomes fully buffered,
+        // so events would sit invisible in a 64KB buffer for hours. Line-buffer it.
+        setvbuf(stdout, nil, _IOLBF, 0)
         if verbose {
             print("\n\(Formatter.bold)🛡️ mac-health Proactive Sentinel Daemon Active\(Formatter.reset)")
             print("\(Formatter.cyan)────────────────────────────────────────────────────────────\(Formatter.reset)")
@@ -732,8 +738,19 @@ final class ProactiveSentinel {
         
         while true {
             let wsMetrics = auditor.auditWindowServer()
+            // Parse the value: pmset separates the key and value with mixed
+            // whitespace ("CPU_Speed_Limit \t= 100"), so an exact substring
+            // check for "CPU_Speed_Limit = 100" never matches and would report
+            // permanent throttling.
             let thermOut = Shell.run("pmset -g therm 2>/dev/null").output
-            let isThrottled = thermOut.contains("CPU_Speed_Limit") && !thermOut.contains("CPU_Speed_Limit = 100")
+            var cpuSpeedLimit = 100
+            for line in thermOut.components(separatedBy: "\n") where line.contains("CPU_Speed_Limit") {
+                let parts = line.components(separatedBy: "=")
+                if parts.count == 2, let val = Int(parts[1].trimmingCharacters(in: .whitespaces)) {
+                    cpuSpeedLimit = val
+                }
+            }
+            let isThrottled = cpuSpeedLimit < 100
             
             // Check for WindowServer latency elevation or stall
             if !wsMetrics.isResponsive || wsMetrics.latencyMs > 250.0 {
@@ -797,15 +814,22 @@ final class ProactiveSentinel {
         do {
             try plistContent.write(toFile: agentPlistPath, atomically: true, encoding: .utf8)
             let uid = userUID
-            Shell.run("chown -R robert:staff '\(dir)' 2>/dev/null")
-            Shell.run("launchctl asuser \(uid) launchctl bootout gui/\(uid) '\(agentPlistPath)' 2>/dev/null")
-            let bootstrap = Shell.run("launchctl asuser \(uid) launchctl bootstrap gui/\(uid) '\(agentPlistPath)' 2>/dev/null || launchctl asuser \(uid) launchctl load '\(agentPlistPath)' 2>/dev/null")
-            
+            // `launchctl asuser` requires root; when running as the target user,
+            // talk to launchd directly.
+            let prefix = getuid() == 0 ? "launchctl asuser \(uid) " : ""
+            Shell.run("\(prefix)launchctl bootout gui/\(uid) '\(agentPlistPath)' 2>/dev/null")
+            let bootstrap = Shell.run("\(prefix)launchctl bootstrap gui/\(uid) '\(agentPlistPath)'")
+
             print("\n\(Formatter.green)✓ Proactive Sentinel LaunchAgent Installed Successfully!\(Formatter.reset)")
             print("  • Plist Location:  \(agentPlistPath)")
             print("  • Binary Path:     \(resolvedBinary)")
             print("  • Service Target:  gui/\(uid) (robert)")
-            print("  • Status:          \(bootstrap.exitCode == 0 ? "Running in Background" : "Registered")")
+            if bootstrap.exitCode == 0 {
+                print("  • Status:          Running in Background")
+            } else {
+                print("  • Status:          \(Formatter.yellow)Bootstrap failed — \(bootstrap.output)\(Formatter.reset)")
+                print("    ↳ If running over SSH, run: launchctl bootstrap gui/\(uid) '\(agentPlistPath)' from a GUI terminal session.")
+            }
             print("  • Logs:            /tmp/mac-health-sentinel.log\n")
         } catch {
             print("\(Formatter.red)✗ Failed to write LaunchAgent plist: \(error.localizedDescription)\(Formatter.reset)")
@@ -814,23 +838,29 @@ final class ProactiveSentinel {
     
     static func uninstallLaunchAgent() {
         let uid = userUID
-        Shell.run("launchctl asuser \(uid) launchctl bootout gui/\(uid) '\(agentPlistPath)' 2>/dev/null")
+        let prefix = getuid() == 0 ? "launchctl asuser \(uid) " : ""
+        Shell.run("\(prefix)launchctl bootout gui/\(uid) '\(agentPlistPath)' 2>/dev/null")
+        Shell.run("pkill -f '[m]ac-health sentinel --daemon' 2>/dev/null")
         try? FileManager.default.removeItem(atPath: agentPlistPath)
         print("\n\(Formatter.green)✓ Proactive Sentinel LaunchAgent Removed Successfully.\(Formatter.reset)\n")
     }
     
     static func statusLaunchAgent() {
-        let uid = userUID
-        let out = Shell.run("launchctl asuser \(uid) launchctl list 2>/dev/null | grep com.robert.mac-health.sentinel").output
-        let psOut = Shell.run("pgrep -f 'mac-health sentinel'").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The [m] regex trick stops pgrep -f from matching the shell that is
+        // running this very pgrep (its command line contains the pattern text),
+        // which previously made status report "Active" even with no daemon.
+        let psOut = Shell.run("pgrep -f '[m]ac-health sentinel --daemon'").output.trimmingCharacters(in: .whitespacesAndNewlines)
         let exists = FileManager.default.fileExists(atPath: agentPlistPath)
-        
+
         print("\n\(Formatter.bold)🛡️ mac-health Sentinel LaunchAgent Status\(Formatter.reset)")
         print("\(Formatter.cyan)────────────────────────────────────────────────────────────\(Formatter.reset)")
         print("  • Installed on Disk: \(exists ? "\(Formatter.green)Yes (\(agentPlistPath))\(Formatter.reset)" : "\(Formatter.yellow)No\(Formatter.reset)")")
-        let isRunning = !out.isEmpty || !psOut.isEmpty
-        let pidStr = psOut.isEmpty ? (out.components(separatedBy: .whitespaces).first ?? "running") : psOut
-        print("  • Service Status:    \(isRunning ? "\(Formatter.green)Active (PID: \(pidStr))\(Formatter.reset)" : "\(Formatter.yellow)Inactive / Stopped\(Formatter.reset)")")
+        let pids = psOut.components(separatedBy: .newlines).filter { !$0.isEmpty }
+        if pids.isEmpty {
+            print("  • Service Status:    \(Formatter.yellow)Inactive / Stopped\(Formatter.reset)")
+        } else {
+            print("  • Service Status:    \(Formatter.green)Active (PID: \(pids.joined(separator: ", ")))\(Formatter.reset)")
+        }
         print("\(Formatter.cyan)────────────────────────────────────────────────────────────\(Formatter.reset)\n")
     }
 }
