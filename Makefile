@@ -19,8 +19,10 @@ TEST_FLAGS :=
 endif
 
 PREFIX ?= $(HOME)/.local
+APP_NAME := Energy Lab
+APP_DIR := dist/$(APP_NAME).app
 
-.PHONY: all build release test clean install uninstall
+.PHONY: all build release test clean install uninstall app lab
 
 all: build
 
@@ -43,3 +45,30 @@ install: release
 
 uninstall:
 	rm -f $(PREFIX)/bin/mac-health
+
+# Run every chaos scenario and print its energy signature.
+lab: build
+	./.build/debug/mac-health energy lab
+
+# SwiftPM emits a bare executable; a SwiftUI app needs a bundle with an
+# Info.plist before AppKit will give it a dock icon, a menu bar, or activation.
+# chaos-worker ships inside the bundle because the lab spawns it by path.
+app: release
+	rm -rf "$(APP_DIR)"
+	mkdir -p "$(APP_DIR)/Contents/MacOS"
+	cp .build/release/EnergyLabApp "$(APP_DIR)/Contents/MacOS/$(APP_NAME)"
+	cp .build/release/chaos-worker "$(APP_DIR)/Contents/MacOS/chaos-worker"
+	printf '%s\n' \
+	  '<?xml version="1.0" encoding="UTF-8"?>' \
+	  '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+	  '<plist version="1.0"><dict>' \
+	  '  <key>CFBundleName</key><string>$(APP_NAME)</string>' \
+	  '  <key>CFBundleDisplayName</key><string>$(APP_NAME)</string>' \
+	  '  <key>CFBundleExecutable</key><string>$(APP_NAME)</string>' \
+	  '  <key>CFBundleIdentifier</key><string>com.fundamentalapplications.energy-lab</string>' \
+	  '  <key>CFBundlePackageType</key><string>APPL</string>' \
+	  '  <key>CFBundleShortVersionString</key><string>1.1.0</string>' \
+	  '  <key>LSMinimumSystemVersion</key><string>12.0</string>' \
+	  '  <key>NSHighResolutionCapable</key><true/>' \
+	  '</dict></plist>' > "$(APP_DIR)/Contents/Info.plist"
+	@echo "built $(APP_DIR) — open it with: open \"$(APP_DIR)\""

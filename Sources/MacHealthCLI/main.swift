@@ -1,5 +1,6 @@
 import Foundation
 import MacHealthKit
+import EnergyLab
 
 let args = CommandLine.arguments
 
@@ -15,6 +16,11 @@ if args.contains("--help") || args.contains("-h") {
     USAGE: mac-health [subcommand / options]
 
     SUBCOMMANDS:
+      energy lab            Run every chaos scenario and show its energy signature
+      energy lab <id>       Run one scenario (see 'energy scenarios')
+      energy scenarios      List the scenarios and what each one teaches
+      energy watch <pid>    Diagnose a live process from its kernel counters
+      energy top [sec]      Rank every live process by the energy it is consuming
       pace                  Scan and pace ALL AI agents, compilers, runtimes, and indexers
       sentinel              Run proactive real-time watchdog sentinel & auto-healing monitor
       sentinel install      Install persistent background LaunchAgent service across reboots
@@ -34,6 +40,10 @@ if args.contains("--help") || args.contains("-h") {
       64                    Usage error
     """)
     exit(0)
+}
+
+if args.contains("energy") {
+    exit(EnergyCommand.run(Array(args.drop { $0 != "energy" }.dropFirst())))
 }
 
 if args.contains("pace") {

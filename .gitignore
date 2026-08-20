@@ -47,3 +47,6 @@ DerivedData/
 *.log
 .system_generated/
 tmp/
+
+# App bundles built by `make app`
+dist/

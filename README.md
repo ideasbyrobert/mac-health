@@ -10,6 +10,12 @@ into "twenty `.gpuRestart` reports name your AMD Radeon Pro 5300M on the VMPT
 channel, and then the watchdog fired." An optional background sentinel is also
 included; see the honest caveat on it below.
 
+It also ships an **energy lab** — a CLI, a SwiftUI app, and a set of real worker
+processes — for understanding where a machine's energy goes and why. Its
+founding observation is that CPU percentage cannot tell a deadlocked process
+from a healthy idle one; on this machine the two read 0.00% and 0.02%. Energy
+signature can. See [docs/energy-lab.md](docs/energy-lab.md).
+
 ---
 
 ## Key Features
@@ -20,6 +26,18 @@ included; see the honest caveat on it below.
 - **Kernel & Extension Integrity**: Audits loaded kernel extensions (`kmutil`) for legacy, crash-prone third-party kexts (e.g. `DisableTurboBoost`).
 - **Battery Health & Sleep Timers**: Evaluates battery condition degradation (`Service Recommended`) and validates display vs. system sleep timer coherency to prevent sleep-wake race conditions.
 - **Universal Resource Governor**: Paces heavy background AI agents (`claude`, `agy`, `antigravity`, `node`), compilers (`swiftc`, `clang`, `xcodebuild`), and indexers (`mdworker`, `rg`) using non-destructive background QoS (`taskpolicy -b`, which includes throttled disk I/O) and `renice +15`. It never kills anything and never touches interactive apps.
+- **Energy Lab**: Six real worker processes, each given the same nominal job and
+  wrong in exactly one named way — a blocking wait, a polling loop, a spin, a
+  lock-order inversion, a pipe-backpressure deadlock, and a memory-bound stall.
+  The lab samples each one's kernel counters (`proc_pid_rusage`: cycles, retired
+  instructions, interrupt and package-idle wakeups) plus a progress heartbeat,
+  and names the pathology with an explicit confidence. It declines to name one
+  when the counters genuinely cannot distinguish two explanations.
+- **Wait-For Graph & Deadlock Detection**: A deadlock is a cycle in the graph of
+  "who waits on whom". The lab builds that graph and searches it, which is the
+  same algorithm a strategy planner uses to reject a circular dependency, run in
+  the opposite direction. The run queue falls out of the same structure: it is
+  the set of actors waiting on nothing.
 - **Proactive Sentinel Daemon** (experimental, opt-in): A background service
   (`LaunchAgent`) that samples `WindowServer` latency and thermal pressure and
   paces batch workloads when either rises.
@@ -66,13 +84,43 @@ branch on it without parsing anything:
 field-by-field contract for `--json` is in
 [docs/json-schema.md](docs/json-schema.md).
 
-### 2. Resource Governance
+### 2. Energy Lab
+
+```bash
+# Run every chaos scenario and show its energy signature
+mac-health energy lab
+
+# Run one scenario
+mac-health energy lab deadlock
+
+# List the scenarios and what each one teaches
+mac-health energy scenarios
+
+# Diagnose a live process from its kernel counters
+mac-health energy watch <pid>
+```
+
+`energy lab` exits 0 when every scenario's pre-stated prediction held, 1 when
+one did not — a prediction that cannot fail teaches nothing.
+
+For a process the lab did not spawn there is no progress heartbeat, so `energy
+watch` will say `indeterminate` rather than guess between a deadlock and a
+healthy wait. That refusal is the point, not a limitation to work around.
+
+The SwiftUI app renders the same claims, with a hand-drawn wait-for graph and an
+energy-flow diagram:
+
+```bash
+make app && open "dist/Energy Lab.app"
+```
+
+### 3. Resource Governance
 ```bash
 # One-shot scan and non-destructive pacing of background workloads
 mac-health pace
 ```
 
-### 3. Proactive Sentinel Service (Auto-Healing & Watchdog Guard)
+### 4. Proactive Sentinel Service (Auto-Healing & Watchdog Guard)
 ```bash
 # Run proactive sentinel in foreground
 mac-health sentinel
@@ -98,8 +146,18 @@ The package splits into a library and a thin executable:
   system access through the `CommandRunning` and `FileReading` protocols, which
   is what lets the tests drive an entire Intel failure workflow off recorded
   fixtures.
+- **`EnergyLab`** — the wait-for graph and its cycle detector, kernel-counter
+  sampling, the pathology classifier with its confidence rules, the scenario
+  catalogue, and the always-on process observer. It depends on `MacHealthKit`,
+  never the reverse.
+- **`chaos-worker`** — a small C executable that misbehaves on purpose, one
+  named way per mode, publishing a progress heartbeat through shared memory so
+  an observer can tell forward progress from its absence.
 - **`MacHealthCLI`** — argument handling and exit codes, and nothing else.
   It produces the `mac-health` binary.
+- **`EnergyLabApp`** — the SwiftUI window. `make app` wraps it in a real bundle
+  with `chaos-worker` inside, because SwiftPM alone emits a bare executable
+  with no bundle identity.
 
 ---
 
@@ -113,6 +171,8 @@ make release        # optimized build at .build/release/mac-health
 make test           # run the test suite
 make install        # install to $PREFIX/bin (PREFIX defaults to ~/.local)
 make uninstall      # remove it again
+make lab            # build, then run every chaos scenario
+make app            # bundle the SwiftUI app into dist/Energy Lab.app
 make clean
 ```
 
@@ -153,5 +213,13 @@ xcrun stapler staple mac-health-<ver>.dmg
   watchdog panic", "gpuRestart storm", and "mux deadlock": the evidence to
   collect, what mac-health reports, the mitigation and why, and how to
   reverse it.
+- [docs/energy-lab.md](docs/energy-lab.md) — the lab: why CPU percentage cannot
+  separate a deadlock from an idle wait, the measured signature of each
+  pathology, the classifier's decision tree, and what confidence each verdict
+  earns.
+- [docs/os-as-distributed-system.md](docs/os-as-distributed-system.md) — the
+  conceptual piece: a process as a service, a mutex as a distributed lock, a
+  pipe as a bounded queue with backpressure — and, given equal weight, where
+  that analogy breaks.
 - [ROADMAP.md](ROADMAP.md) — the plan to grow this into a general rescue
   daemon + CLI for dual-GPU Intel Macs.
