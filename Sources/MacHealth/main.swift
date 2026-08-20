@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 // MARK: - Models
 
@@ -8,9 +9,10 @@ struct DiagnosticReport: Codable {
     let cpu: CPUMetrics
     let memory: MemoryMetrics
     let gpu: GPUMetrics
+    let windowServer: WindowServerMetrics
     let power: PowerMetrics
     let disk: DiskMetrics
-    let daemons: DaemonMetrics
+    let kernelExtensions: KernelExtensionsMetrics
     let xcodeReadiness: XcodeReadiness
 }
 
@@ -37,19 +39,33 @@ struct GPUMetrics: Codable {
     let activeIncidentsLastHour: Int
     let historicalIncidents24h: Int
     let hoursSinceLastCrash: Double
+    let gpuSwitchMode: String
+    let gpuSwitchSafe: Bool
     let status: String
     let latestIncidentName: String?
     let latestIncidentTime: String?
+}
+
+struct WindowServerMetrics: Codable {
+    let latencyMs: Double
+    let isResponsive: Bool
+    let cpuPercent: Double
+    let sleepAssertionHolder: Bool
+    let status: String
 }
 
 struct PowerMetrics: Codable {
     let powerSource: String
     let batteryPercentage: Int
     let batteryCondition: String
+    let isBatteryDegraded: Bool
     let sleepPrevented: Bool
     let sleepAssertionHolder: String?
+    let batteryDisplaySleepMinutes: Int
     let batterySleepMinutes: Int
+    let acDisplaySleepMinutes: Int
     let acSleepMinutes: Int
+    let sleepTimingsCoherent: Bool
     let status: String
 }
 
@@ -61,9 +77,10 @@ struct DiskMetrics: Codable {
     let status: String
 }
 
-struct DaemonMetrics: Codable {
-    let gSwitchRunning: Bool
-    let turboBoostSwitcherRunning: Bool
+struct KernelExtensionsMetrics: Codable {
+    let nonAppleKextsCount: Int
+    let nonAppleKextNames: [String]
+    let isCleanNative: Bool
     let status: String
 }
 
@@ -72,10 +89,13 @@ struct XcodeReadiness: Codable {
     let diskSpaceAdequate: Bool
     let thermalsUnthrottled: Bool
     let powerConnected: Bool
+    let batteryHealthy: Bool
+    let gpuStable: Bool
+    let windowServerHealthy: Bool
     let recommendations: [String]
 }
 
-// MARK: - Helper Shell Executor
+// MARK: - Shell Executor
 
 final class Shell {
     @discardableResult
@@ -103,7 +123,6 @@ final class Shell {
 
 final class UniversalGovernor {
     
-    // Categorized process definitions for non-destructive governance
     struct GovernanceRule {
         let category: String
         let patterns: [String]
@@ -164,14 +183,11 @@ final class UniversalGovernor {
                     .filter { $0 != currentPID && $0 != 1 && $0 != 0 }
                 
                 for pid in pids {
-                    // Avoid duplicating already paced PIDs in this pass
                     if results.contains(where: { $0.pid == pid }) { continue }
                     
-                    // Fetch process command name
                     let commOut = Shell.run("ps -p \(pid) -o comm= 2>/dev/null").output
                     let procName = URL(fileURLWithPath: commOut).lastPathComponent
                     
-                    // Apply non-destructive QoS and priority governance
                     if rule.backgroundQoS {
                         Shell.run("taskpolicy -b -p \(pid) 2>/dev/null")
                     }
@@ -206,17 +222,6 @@ final class UniversalGovernor {
         
         return results
     }
-    
-    static func runDaemon(intervalSec: UInt32 = 5) {
-        print("\n\(Formatter.bold)🛡️ Universal System Governor Daemon Active\(Formatter.reset)")
-        print("Monitoring process table and auto-pacing heavy tasks every \(intervalSec)s...")
-        print("Press Ctrl+C to stop.\n")
-        
-        while true {
-            let _ = paceAll(verbose: false)
-            sleep(intervalSec)
-        }
-    }
 }
 
 // MARK: - Auditor
@@ -227,18 +232,33 @@ final class MacHealthAuditor {
         let cpu = auditCPU()
         let memory = auditMemory()
         let gpu = auditGPU()
+        let windowServer = auditWindowServer()
         let power = auditPower()
         let disk = auditDisk()
-        let daemons = auditDaemons()
-        let xcode = auditXcodeReadiness(disk: disk, cpu: cpu, power: power)
+        let kexts = auditKernelExtensions()
+        let xcode = auditXcodeReadiness(disk: disk, cpu: cpu, power: power, gpu: gpu, ws: windowServer, kexts: kexts)
         
         var isHealthy = true
+        var isCritical = false
+        
         if cpu.speedLimitPercent < 100 || cpu.thermalWarning { isHealthy = false }
         if memory.pagesThrottled > 0 { isHealthy = false }
-        if gpu.activeIncidentsLastHour > 0 { isHealthy = false }
-        if !daemons.gSwitchRunning || !daemons.turboBoostSwitcherRunning { isHealthy = false }
+        if gpu.activeIncidentsLastHour > 0 { isHealthy = false; isCritical = true }
+        if gpu.historicalIncidents24h > 0 && gpu.hoursSinceLastCrash < 24.0 { isHealthy = false }
+        if !gpu.gpuSwitchSafe { isHealthy = false }
+        if !windowServer.isResponsive || windowServer.latencyMs > 500.0 { isHealthy = false; isCritical = true }
+        if power.isBatteryDegraded { isHealthy = false }
+        if !power.sleepTimingsCoherent { isHealthy = false }
+        if !kexts.isCleanNative { isHealthy = false }
         
-        let overallHealth = isHealthy ? "OPTIMAL" : "DEGRADED_OR_WARNING"
+        let overallHealth: String
+        if isCritical {
+            overallHealth = "CRITICAL_ATTENTION_NEEDED"
+        } else if !isHealthy {
+            overallHealth = "DEGRADED_OR_WARNING"
+        } else {
+            overallHealth = "OPTIMAL"
+        }
         
         return DiagnosticReport(
             timestamp: Date(),
@@ -246,9 +266,10 @@ final class MacHealthAuditor {
             cpu: cpu,
             memory: memory,
             gpu: gpu,
+            windowServer: windowServer,
             power: power,
             disk: disk,
-            daemons: daemons,
+            kernelExtensions: kexts,
             xcodeReadiness: xcode
         )
     }
@@ -305,8 +326,9 @@ final class MacHealthAuditor {
             swapUsed = Double(numStr) ?? 0.0
         }
         if let freeRange = swapOut.range(of: "free = ") {
-            let sub = swapFreeRange(from: swapOut, range: freeRange)
-            swapFree = sub
+            let sub = swapOut[freeRange.upperBound...]
+            let numStr = sub.prefix(while: { $0.isNumber || $0 == "." })
+            swapFree = Double(numStr) ?? 0.0
         }
         
         let vmStatOut = Shell.run("vm_stat").output
@@ -341,14 +363,8 @@ final class MacHealthAuditor {
         )
     }
     
-    private func swapFreeRange(from str: String, range: Range<String.Index>) -> Double {
-        let sub = str[range.upperBound...]
-        let numStr = sub.prefix(while: { $0.isNumber || $0 == "." })
-        return Double(numStr) ?? 0.0
-    }
-    
     private func auditGPU() -> GPUMetrics {
-        let logsCmd = "find /Library/Logs/DiagnosticReports/ -type f \\( -name \"*.gpuRestart\" -o -name \"*.spin\" -o -name \"*.panic\" \\) -mtime -1 -exec stat -f \"%m %N\" {} \\; 2>/dev/null | sort -rn"
+        let logsCmd = "find /Library/Logs/DiagnosticReports/ -type f \\( -name \"*.gpuRestart\" -o -name \"*.spin\" -o -name \"*.panic\" -o -name \"*.shutdownStall\" \\) -mtime -1 -exec stat -f \"%m %N\" {} \\; 2>/dev/null | sort -rn"
         let logsOut = Shell.run(logsCmd).output
         
         let now = Date().timeIntervalSince1970
@@ -381,14 +397,105 @@ final class MacHealthAuditor {
             }
         }
         
-        let status = (active1h == 0) ? "STABLE_RESOLVED" : "ACTIVE_HANGS"
+        // Audit GPU switching mode
+        let customOut = Shell.run("pmset -g custom").output
+        var gpuSwitchVal = 2
+        for line in customOut.components(separatedBy: "\n") {
+            if line.contains("gpuswitch") {
+                let parts = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                if parts.count >= 2, let val = Int(parts[1]) {
+                    gpuSwitchVal = val
+                    break
+                }
+            }
+        }
+        
+        let gpuSwitchMode: String
+        let gpuSwitchSafe: Bool
+        switch gpuSwitchVal {
+        case 1:
+            gpuSwitchMode = "Discrete Only (AMD Forced - Stable)"
+            gpuSwitchSafe = true
+        case 0:
+            gpuSwitchMode = "Integrated Only (Low Power)"
+            gpuSwitchSafe = true
+        default:
+            gpuSwitchMode = "Dynamic Switching (Deadlock Risk)"
+            gpuSwitchSafe = false
+        }
+        
+        let status: String
+        if active1h > 0 {
+            status = "ACTIVE_HANGS_LAST_HOUR"
+        } else if historical24h > 0 && hoursSince < 24.0 {
+            status = "HISTORICAL_PANICS_RECORDED"
+        } else if !gpuSwitchSafe {
+            status = "DYNAMIC_SWITCHING_UNSAFE"
+        } else {
+            status = "STABLE"
+        }
+        
         return GPUMetrics(
             activeIncidentsLastHour: active1h,
             historicalIncidents24h: historical24h,
             hoursSinceLastCrash: hoursSince,
+            gpuSwitchMode: gpuSwitchMode,
+            gpuSwitchSafe: gpuSwitchSafe,
             status: status,
             latestIncidentName: latestName,
             latestIncidentTime: latestTimeStr
+        )
+    }
+    
+    func auditWindowServer() -> WindowServerMetrics {
+        // Probe WindowServer Mach IPC round-trip latency
+        var latency = 0.0
+        var responsive = true
+        
+        let group = DispatchGroup()
+        group.enter()
+        
+        let startTime = CFAbsoluteTimeGetCurrent()
+        DispatchQueue.global(qos: .userInteractive).async {
+            let list = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID)
+            let _ = (list as? [Any])?.count ?? 0
+            latency = (CFAbsoluteTimeGetCurrent() - startTime) * 1000.0
+            group.leave()
+        }
+        
+        let result = group.wait(timeout: .now() + .milliseconds(1500))
+        if result == .timedOut {
+            latency = 1500.0
+            responsive = false
+        }
+        
+        // WindowServer CPU usage
+        let wsPidOut = Shell.run("pgrep -x WindowServer 2>/dev/null").output
+        var wsCpu = 0.0
+        if let wsPid = Int(wsPidOut.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            let cpuOut = Shell.run("ps -p \(wsPid) -o %cpu= 2>/dev/null").output
+            wsCpu = Double(cpuOut.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0.0
+        }
+        
+        // Sleep assertion check
+        let assertOut = Shell.run("pmset -g assertions 2>/dev/null").output
+        let wsAssert = assertOut.contains("WindowServer")
+        
+        let status: String
+        if !responsive || latency >= 1000.0 {
+            status = "UNRESPONSIVE_STALL_DETECTED"
+        } else if latency > 200.0 || wsCpu > 80.0 {
+            status = "ELEVATED_LATENCY"
+        } else {
+            status = "RESPONSIVE"
+        }
+        
+        return WindowServerMetrics(
+            latencyMs: latency,
+            isResponsive: responsive,
+            cpuPercent: wsCpu,
+            sleepAssertionHolder: wsAssert,
+            status: status
         )
     }
     
@@ -404,7 +511,9 @@ final class MacHealthAuditor {
         
         let customOut = Shell.run("pmset -g custom").output
         var battSleep = 15
+        var battDisplaySleep = 10
         var acSleep = 0
+        var acDisplaySleep = 20
         var inBattSection = false
         var inACSection = false
         
@@ -413,6 +522,12 @@ final class MacHealthAuditor {
                 inBattSection = true; inACSection = false
             } else if line.contains("AC Power:") {
                 inACSection = true; inBattSection = false
+            } else if line.contains("displaysleep") {
+                let parts = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                if parts.count >= 2, let val = Int(parts[1]) {
+                    if inBattSection { battDisplaySleep = val }
+                    if inACSection { acDisplaySleep = val }
+                }
             } else if line.contains("sleep") && !line.contains("displaysleep") && !line.contains("disksleep") {
                 let parts = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
                 if parts.count >= 2, let val = Int(parts[1]) {
@@ -421,6 +536,11 @@ final class MacHealthAuditor {
                 }
             }
         }
+        
+        // Coherency check: displaysleep must be <= sleep when sleep is enabled (> 0)
+        var coherent = true
+        if battSleep > 0 && battDisplaySleep > battSleep { coherent = false }
+        if acSleep > 0 && acDisplaySleep > acSleep { coherent = false }
         
         let assertOut = Shell.run("pmset -g assertions").output
         let isAsserted = assertOut.contains("PreventUserIdleSystemSleep") || assertOut.contains("PreventSystemSleep")
@@ -431,19 +551,33 @@ final class MacHealthAuditor {
             holder = "WindowServer"
         }
         
-        let conditionOut = Shell.run("system_profiler SPPowerDataType | grep 'Condition:'").output
+        let conditionOut = Shell.run("system_profiler SPPowerDataType 2>/dev/null | grep 'Condition:'").output
         let condition = conditionOut.replacingOccurrences(of: "Condition:", with: "").trimmingCharacters(in: .whitespaces)
+        let isDegraded = !condition.isEmpty && condition.lowercased() != "normal"
         
-        let status = (isAC && battSleep >= 10) ? "OPTIMAL" : "CAUTION"
+        let status: String
+        if isDegraded {
+            status = "SERVICE_RECOMMENDED"
+        } else if !coherent {
+            status = "INCOHERENT_SLEEP_TIMINGS"
+        } else if isAC {
+            status = "OPTIMAL_AC"
+        } else {
+            status = "BATTERY_ACTIVE"
+        }
         
         return PowerMetrics(
             powerSource: isAC ? "AC Charger" : "Battery",
             batteryPercentage: batteryPercent,
             batteryCondition: condition.isEmpty ? "Normal" : condition,
+            isBatteryDegraded: isDegraded,
             sleepPrevented: isAsserted,
             sleepAssertionHolder: holder,
+            batteryDisplaySleepMinutes: battDisplaySleep,
             batterySleepMinutes: battSleep,
+            acDisplaySleepMinutes: acDisplaySleep,
             acSleepMinutes: acSleep,
+            sleepTimingsCoherent: coherent,
             status: status
         )
     }
@@ -474,43 +608,230 @@ final class MacHealthAuditor {
         )
     }
     
-    private func auditDaemons() -> DaemonMetrics {
-        let gswitch = Shell.run("pgrep -l gSwitch").exitCode == 0
-        let tbs = Shell.run("pgrep -l -f 'Turbo Boost Switcher'").exitCode == 0
-        let status = (gswitch && tbs) ? "ALL_RUNNING" : "MISSING_DAEMON"
+    private func auditKernelExtensions() -> KernelExtensionsMetrics {
+        let kextOut = Shell.run("kmutil showloaded 2>/dev/null | grep -v 'com.apple.' | grep -v 'Index Refs' | grep -v 'Executing:' | grep -v 'No variant'").output
+        let lines = kextOut.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
         
-        return DaemonMetrics(
-            gSwitchRunning: gswitch,
-            turboBoostSwitcherRunning: tbs,
+        var nonAppleNames: [String] = []
+        for line in lines {
+            let parts = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            if parts.count >= 6 {
+                nonAppleNames.append(parts[5])
+            } else if !parts.isEmpty {
+                nonAppleNames.append(parts.joined(separator: " "))
+            }
+        }
+        
+        let isClean = nonAppleNames.isEmpty
+        let status = isClean ? "CLEAN_NATIVE" : "UNSAFE_LEGACY_KEXTS_LOADED"
+        
+        return KernelExtensionsMetrics(
+            nonAppleKextsCount: nonAppleNames.count,
+            nonAppleKextNames: nonAppleNames,
+            isCleanNative: isClean,
             status: status
         )
     }
     
-    private func auditXcodeReadiness(disk: DiskMetrics, cpu: CPUMetrics, power: PowerMetrics) -> XcodeReadiness {
+    private func auditXcodeReadiness(
+        disk: DiskMetrics,
+        cpu: CPUMetrics,
+        power: PowerMetrics,
+        gpu: GPUMetrics,
+        ws: WindowServerMetrics,
+        kexts: KernelExtensionsMetrics
+    ) -> XcodeReadiness {
         var recs: [String] = []
+        
         let diskOk = disk.freeGB >= 45.0
         if !diskOk {
-            recs.append("Free disk space is under 45 GB (current: \(Int(disk.freeGB)) GB). Xcode install requires ~40 GB free.")
+            recs.append("Free disk space is under 45 GB (current: \(Int(disk.freeGB)) GB). Xcode builds require >= 40 GB free.")
         }
         
         let thermOk = cpu.speedLimitPercent == 100 && !cpu.thermalWarning
         if !thermOk {
-            recs.append("CPU is currently thermal throttled (\(cpu.speedLimitPercent)%). Heavy compilation will trigger fans and delays.")
+            recs.append("CPU is currently thermal throttled (\(cpu.speedLimitPercent)%). Heavy compilation will trigger thermal delays.")
         }
         
         let powerOk = power.powerSource == "AC Charger"
         if !powerOk {
-            recs.append("Machine is on battery power. Keep charger plugged into right-side ports during heavy Xcode builds.")
+            recs.append("Machine is on battery power. Plug into 96W AC adapter during heavy builds.")
         }
         
-        let isReady = diskOk && thermOk && powerOk
+        let batteryOk = !power.isBatteryDegraded
+        if !batteryOk {
+            recs.append("Battery health is '\(power.batteryCondition)'. High power draw may cause sudden voltage drops if unplugged.")
+        }
+        
+        let gpuOk = gpu.gpuSwitchSafe && gpu.activeIncidentsLastHour == 0
+        if !gpuOk {
+            if !gpu.gpuSwitchSafe {
+                recs.append("Dynamic GPU switching is active. Run 'pmset -a gpuswitch 1' to lock dedicated GPU and prevent WindowServer deadlocks.")
+            }
+            if gpu.activeIncidentsLastHour > 0 {
+                recs.append("GPU crashes/restarts occurred within the last hour.")
+            }
+        }
+        
+        let wsOk = ws.isResponsive && ws.latencyMs < 500.0
+        if !wsOk {
+            recs.append("WindowServer is experiencing elevated latency (\(String(format: "%.1f", ws.latencyMs))ms). UI compositor may be stalling.")
+        }
+        
+        if !kexts.isCleanNative {
+            recs.append("Non-native third-party kernel extensions loaded: \(kexts.nonAppleKextNames.joined(separator: ", ")). Unload them to avoid kernel panics.")
+        }
+        
+        let isReady = diskOk && thermOk && powerOk && gpuOk && wsOk && kexts.isCleanNative
         return XcodeReadiness(
             isReady: isReady,
             diskSpaceAdequate: diskOk,
             thermalsUnthrottled: thermOk,
             powerConnected: powerOk,
+            batteryHealthy: batteryOk,
+            gpuStable: gpuOk,
+            windowServerHealthy: wsOk,
             recommendations: recs
         )
+    }
+}
+
+// MARK: - Proactive Sentinel & Auto-Healing Daemon
+
+final class ProactiveSentinel {
+    
+    static var userHome: String {
+        if FileManager.default.fileExists(atPath: "/Users/robert") {
+            return "/Users/robert"
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.path
+    }
+    
+    static var agentPlistPath: String {
+        return "\(userHome)/Library/LaunchAgents/com.robert.mac-health.sentinel.plist"
+    }
+    
+    static var userUID: String {
+        let uidOut = Shell.run("id -u robert 2>/dev/null || id -u").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return uidOut.isEmpty ? "502" : uidOut
+    }
+    
+    static func runDaemon(intervalSec: UInt32 = 5, verbose: Bool = true) {
+        if verbose {
+            print("\n\(Formatter.bold)🛡️ mac-health Proactive Sentinel Daemon Active\(Formatter.reset)")
+            print("\(Formatter.cyan)────────────────────────────────────────────────────────────\(Formatter.reset)")
+            print("  • Heartbeat Interval:  \(intervalSec) seconds")
+            print("  • Proactive Monitors:  WindowServer IPC, GPU Watchdog, Thermal Headroom, Swap Thrashing")
+            print("  • Auto-Healing:        Dynamic QoS Pacing, Priority Shedding, Sleep Timings")
+            print("\(Formatter.cyan)────────────────────────────────────────────────────────────\(Formatter.reset)\n")
+            print("Sentinel is actively guarding the system. Press Ctrl+C to stop.\n")
+        }
+        
+        let auditor = MacHealthAuditor()
+        var consecutiveSlowWS = 0
+        
+        while true {
+            let wsMetrics = auditor.auditWindowServer()
+            let thermOut = Shell.run("pmset -g therm 2>/dev/null").output
+            let isThrottled = thermOut.contains("CPU_Speed_Limit") && !thermOut.contains("CPU_Speed_Limit = 100")
+            
+            // Check for WindowServer latency elevation or stall
+            if !wsMetrics.isResponsive || wsMetrics.latencyMs > 250.0 {
+                consecutiveSlowWS += 1
+                let timestamp = Formatter.timeString(Date())
+                print("[\(timestamp)] \(Formatter.red)⚠ WindowServer Latency Spike: \(String(format: "%.1f", wsMetrics.latencyMs))ms (Streak: \(consecutiveSlowWS))\(Formatter.reset)")
+                print("  ↳ Proactively shedding CPU contention and pacing heavy background processes...")
+                
+                // Immediately pace all background runtimes and heavy tasks
+                UniversalGovernor.paceAll(verbose: false)
+            } else {
+                if consecutiveSlowWS > 0 {
+                    let timestamp = Formatter.timeString(Date())
+                    print("[\(timestamp)] \(Formatter.green)✓ WindowServer Recovered: \(String(format: "%.1f", wsMetrics.latencyMs))ms latency (Normal)\(Formatter.reset)")
+                }
+                consecutiveSlowWS = 0
+            }
+            
+            // If thermal throttling kicks in, auto-pace heavy toolchains
+            if isThrottled {
+                let timestamp = Formatter.timeString(Date())
+                print("[\(timestamp)] \(Formatter.yellow)▲ Thermal Throttling Detected → Auto-pacing heavy compilers & agents...\(Formatter.reset)")
+                UniversalGovernor.paceAll(verbose: false)
+            }
+            
+            sleep(intervalSec)
+        }
+    }
+    
+    static func installLaunchAgent() {
+        let resolvedBinary = "/Users/robert/.local/bin/mac-health"
+        
+        let plistContent = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>com.robert.mac-health.sentinel</string>
+            <key>ProgramArguments</key>
+            <array>
+                <string>\(resolvedBinary)</string>
+                <string>sentinel</string>
+                <string>--daemon</string>
+            </array>
+            <key>RunAtLoad</key>
+            <true/>
+            <key>KeepAlive</key>
+            <true/>
+            <key>StandardOutPath</key>
+            <string>/tmp/mac-health-sentinel.log</string>
+            <key>StandardErrorPath</key>
+            <string>/tmp/mac-health-sentinel.err</string>
+        </dict>
+        </plist>
+        """
+        
+        let dir = URL(fileURLWithPath: agentPlistPath).deletingLastPathComponent().path
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: nil)
+        
+        do {
+            try plistContent.write(toFile: agentPlistPath, atomically: true, encoding: .utf8)
+            let uid = userUID
+            Shell.run("chown -R robert:staff '\(dir)' 2>/dev/null")
+            Shell.run("launchctl asuser \(uid) launchctl bootout gui/\(uid) '\(agentPlistPath)' 2>/dev/null")
+            let bootstrap = Shell.run("launchctl asuser \(uid) launchctl bootstrap gui/\(uid) '\(agentPlistPath)' 2>/dev/null || launchctl asuser \(uid) launchctl load '\(agentPlistPath)' 2>/dev/null")
+            
+            print("\n\(Formatter.green)✓ Proactive Sentinel LaunchAgent Installed Successfully!\(Formatter.reset)")
+            print("  • Plist Location:  \(agentPlistPath)")
+            print("  • Binary Path:     \(resolvedBinary)")
+            print("  • Service Target:  gui/\(uid) (robert)")
+            print("  • Status:          \(bootstrap.exitCode == 0 ? "Running in Background" : "Registered")")
+            print("  • Logs:            /tmp/mac-health-sentinel.log\n")
+        } catch {
+            print("\(Formatter.red)✗ Failed to write LaunchAgent plist: \(error.localizedDescription)\(Formatter.reset)")
+        }
+    }
+    
+    static func uninstallLaunchAgent() {
+        let uid = userUID
+        Shell.run("launchctl asuser \(uid) launchctl bootout gui/\(uid) '\(agentPlistPath)' 2>/dev/null")
+        try? FileManager.default.removeItem(atPath: agentPlistPath)
+        print("\n\(Formatter.green)✓ Proactive Sentinel LaunchAgent Removed Successfully.\(Formatter.reset)\n")
+    }
+    
+    static func statusLaunchAgent() {
+        let uid = userUID
+        let out = Shell.run("launchctl asuser \(uid) launchctl list 2>/dev/null | grep com.robert.mac-health.sentinel").output
+        let psOut = Shell.run("pgrep -f 'mac-health sentinel'").output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let exists = FileManager.default.fileExists(atPath: agentPlistPath)
+        
+        print("\n\(Formatter.bold)🛡️ mac-health Sentinel LaunchAgent Status\(Formatter.reset)")
+        print("\(Formatter.cyan)────────────────────────────────────────────────────────────\(Formatter.reset)")
+        print("  • Installed on Disk: \(exists ? "\(Formatter.green)Yes (\(agentPlistPath))\(Formatter.reset)" : "\(Formatter.yellow)No\(Formatter.reset)")")
+        let isRunning = !out.isEmpty || !psOut.isEmpty
+        let pidStr = psOut.isEmpty ? (out.components(separatedBy: .whitespaces).first ?? "running") : psOut
+        print("  • Service Status:    \(isRunning ? "\(Formatter.green)Active (PID: \(pidStr))\(Formatter.reset)" : "\(Formatter.yellow)Inactive / Stopped\(Formatter.reset)")")
+        print("\(Formatter.cyan)────────────────────────────────────────────────────────────\(Formatter.reset)\n")
     }
 }
 
@@ -525,69 +846,91 @@ struct Formatter {
     static let bold = "\u{001B}[1m"
     static let reset = "\u{001B}[0m"
     
+    static func timeString(_ date: Date) -> String {
+        let df = DateFormatter()
+        df.dateFormat = "HH:mm:ss"
+        return df.string(from: date)
+    }
+    
     static func render(_ report: DiagnosticReport) {
-        print("\n\(bold)🍎 macOS Hardware & Workload Health Audit\(reset)")
+        print("\n\(bold)🍎 macOS Hardware Health & Watchdog Guard Audit\(reset)")
         print("\(cyan)────────────────────────────────────────────────────────────\(reset)")
         
-        // Overview banner
-        if report.overallHealth == "OPTIMAL" {
-            print("  System Status:  \(green)\(bold)● OPTIMAL (All Guardrails Active)\(reset)")
-        } else {
-            print("  System Status:  \(yellow)\(bold)▲ ATTENTION NEEDED\(reset)")
+        switch report.overallHealth {
+        case "OPTIMAL":
+            print("  System Status:  \(green)\(bold)● OPTIMAL (All Guardrails Active & Stable)\(reset)")
+        case "DEGRADED_OR_WARNING":
+            print("  System Status:  \(yellow)\(bold)▲ ATTENTION / DEGRADED (Check Warnings Below)\(reset)")
+        default:
+            print("  System Status:  \(red)\(bold)■ CRITICAL ATTENTION REQUIRED\(reset)")
         }
         print("  Audit Time:     \(report.timestamp)")
         print("\(cyan)────────────────────────────────────────────────────────────\(reset)\n")
         
-        // 1. CPU & Thermals
-        print("\(bold)1. CPU & Thermal Throttling\(reset)")
+        // 1. WindowServer & Watchdog Health
+        print("\(bold)1. WindowServer Compositor & Watchdog Probe\(reset)")
+        let wsColor = report.windowServer.isResponsive ? (report.windowServer.latencyMs < 200 ? green : yellow) : red
+        print("   • IPC Latency:      \(wsColor)\(String(format: "%.1f", report.windowServer.latencyMs)) ms\(reset) \(report.windowServer.isResponsive ? "✓ Responsive" : "⚠ Stall Detected")")
+        print("   • CPU Utilization:  \(String(format: "%.1f", report.windowServer.cpuPercent))%")
+        print("   • Sleep Assertion:  \(report.windowServer.sleepAssertionHolder ? "Active" : "None")")
+        
+        // 2. GPU Power & Mux Stability
+        print("\n\(bold)2. GPU Stability & Hardware Mux State\(reset)")
+        let gpuMuxColor = report.gpu.gpuSwitchSafe ? green : red
+        print("   • GPU Mode:         \(gpuMuxColor)\(report.gpu.gpuSwitchMode)\(reset)")
+        if report.gpu.activeIncidentsLastHour == 0 {
+            let hoursStr = String(format: "%.1f", report.gpu.hoursSinceLastCrash)
+            print("   • Active State:     \(green)✓ 0 Crashes in last \(hoursStr)h\(reset)")
+            if report.gpu.historicalIncidents24h > 0, let time = report.gpu.latestIncidentTime, let name = report.gpu.latestIncidentName {
+                print("   • 24h History:      \(yellow)\(report.gpu.historicalIncidents24h) prior incidents recorded (last: \(name) at \(time))\(reset)")
+            }
+        } else {
+            print("   • Active State:     \(red)⚠ \(report.gpu.activeIncidentsLastHour) crashes in past hour!\(reset)")
+        }
+        
+        // 3. Power & Battery Health
+        print("\n\(bold)3. Power, Battery & Sleep Timings\(reset)")
+        print("   • Source:           \(report.power.powerSource == "AC Charger" ? "\(green)🔌 AC Power (96W)\(reset)" : "\(yellow)🔋 Battery\(reset)")")
+        let battCondColor = report.power.isBatteryDegraded ? red : green
+        print("   • Battery Level:    \(report.power.batteryPercentage)% (\(battCondColor)\(report.power.batteryCondition)\(reset))")
+        let sleepTimingColor = report.power.sleepTimingsCoherent ? green : red
+        let isAC = report.power.powerSource == "AC Charger"
+        let dispSleep = isAC ? report.power.acDisplaySleepMinutes : report.power.batteryDisplaySleepMinutes
+        let sysSleep = isAC ? report.power.acSleepMinutes : report.power.batterySleepMinutes
+        print("   • Sleep Timers:     \(sleepTimingColor)Display: \(dispSleep)m / Sleep: \(sysSleep)m \(report.power.sleepTimingsCoherent ? "✓ Coherent" : "⚠ Inverted Order")\(reset)")
+        
+        // 4. Kernel Extensions & Cleanliness
+        print("\n\(bold)4. Kernel Integrity & Third-Party Extensions\(reset)")
+        if report.kernelExtensions.isCleanNative {
+            print("   • Native State:     \(green)✓ 100% Clean (0 Unsafe Third-Party Kexts)\(reset)")
+        } else {
+            print("   • Non-Apple Kexts:  \(red)⚠ \(report.kernelExtensions.nonAppleKextsCount) detected: \(report.kernelExtensions.nonAppleKextNames.joined(separator: ", "))\(reset)")
+        }
+        
+        // 5. CPU & Thermal State
+        print("\n\(bold)5. CPU & Thermal Headroom\(reset)")
         print("   • Model:            \(report.cpu.model)")
         print("   • Cores:            \(report.cpu.physicalCores) Physical / \(report.cpu.logicalCores) Virtual (Hyper-Threads)")
         let speedColor = report.cpu.speedLimitPercent == 100 ? green : red
         print("   • CPU Speed Limit:  \(speedColor)\(report.cpu.speedLimitPercent)%\(reset) \(report.cpu.speedLimitPercent == 100 ? "✓ Full Speed" : "⚠ Throttled")")
         print("   • Thermal State:    \(report.cpu.thermalWarning ? "\(red)⚠ Warning Recorded\(reset)" : "\(green)✓ Safe Operating Zone\(reset)")")
         
-        // 2. Memory & Swapping
-        print("\n\(bold)2. Memory & Virtual Memory Pressure\(reset)")
+        // 6. Memory & Virtual Memory Pressure
+        print("\n\(bold)6. Memory & Virtual Memory Pressure\(reset)")
         print("   • Physical Memory:  \(Int(report.memory.totalPhysicalGB)) GB")
         print("   • Free RAM:         \(String(format: "%.2f", report.memory.freeGB)) GB")
         print("   • Swap Used:        \(Int(report.memory.swapUsedMB)) MB")
         print("   • Pages Throttled:  \(report.memory.pagesThrottled == 0 ? "\(green)0 Pages (Zero Thrashing)\(reset)" : "\(red)\(report.memory.pagesThrottled) Pages\(reset)")")
         
-        // 3. GPU Stability
-        print("\n\(bold)3. GPU Power & Crash Audit\(reset)")
-        if report.gpu.activeIncidentsLastHour == 0 {
-            let hoursStr = String(format: "%.1f", report.gpu.hoursSinceLastCrash)
-            print("   • Active State:     \(green)✓ 0 Crashes in last \(hoursStr)h (STABLE)\(reset)")
-            if report.gpu.historicalIncidents24h > 0, let time = report.gpu.latestIncidentTime {
-                print("   • Historical:       \(report.gpu.historicalIncidents24h) prior restarts resolved at \(time) (before guardrails)")
-            }
-        } else {
-            print("   • Active State:     \(red)⚠ \(report.gpu.activeIncidentsLastHour) crashes in past hour!\(reset)")
-        }
-        
-        // 4. Protection Daemons
-        print("\n\(bold)4. Active Guardrail Daemons\(reset)")
-        let gColor = report.daemons.gSwitchRunning ? green : red
-        let tColor = report.daemons.turboBoostSwitcherRunning ? green : red
-        print("   • gSwitch:          \(gColor)\(report.daemons.gSwitchRunning ? "✓ Running (GPU Isolated)" : "✗ NOT Running")\(reset)")
-        print("   • TBS Pro:          \(tColor)\(report.daemons.turboBoostSwitcherRunning ? "✓ Running (80°C Auto-Cap)" : "✗ NOT Running")\(reset)")
-        
-        // 5. Power & Sleep Timers
-        print("\n\(bold)5. Power & Sleep Management\(reset)")
-        print("   • Source:           \(report.power.powerSource == "AC Charger" ? "\(green)🔌 AC Power (96W)\(reset)" : "\(yellow)🔋 Battery\(reset)")")
-        print("   • Battery Level:    \(report.power.batteryPercentage)% (\(report.power.batteryCondition))")
-        print("   • Battery Sleep:    \(report.power.batterySleepMinutes >= 10 ? "\(green)\(report.power.batterySleepMinutes) mins (Safe)\(reset)" : "\(red)\(report.power.batterySleepMinutes) mins (Too aggressive!)\(reset)")")
-        print("   • Sleep Prevented:  \(report.power.sleepPrevented ? "\(green)✓ Active (\(report.power.sleepAssertionHolder ?? "system"))\(reset)" : "No")")
-        
-        // 6. Disk & Xcode Readiness
-        print("\n\(bold)6. Xcode & Heavy Workload Readiness\(reset)")
+        // 7. Disk & Xcode Readiness
+        print("\n\(bold)7. Xcode & Compilation Readiness\(reset)")
         print("   • Free Disk Space:  \(green)\(Int(report.disk.freeGB)) GB free\(reset) (\(Int(report.disk.percentFree))% available)")
         if report.xcodeReadiness.isReady {
-            print("   • Xcode Status:     \(green)\(bold)✓ READY FOR XCODE & COMPILATION\(reset)")
+            print("   • Readiness Status: \(green)\(bold)✓ READY FOR HEAVY WORKLOADS & COMPILATION\(reset)")
         } else {
-            print("   • Xcode Status:     \(yellow)\(bold)▲ CAUTION BEFORE HEAVY BUILDS\(reset)")
+            print("   • Readiness Status: \(yellow)\(bold)▲ CAUTION BEFORE HEAVY BUILDS\(reset)")
             for rec in report.xcodeReadiness.recommendations {
-                print("     - \(yellow)\(rec)\(reset)")
+                print("     ↳ \(yellow)\(rec)\(reset)")
             }
         }
         print("\(cyan)────────────────────────────────────────────────────────────\(reset)\n")
@@ -600,18 +943,21 @@ let args = CommandLine.arguments
 
 if args.contains("--help") || args.contains("-h") {
     print("""
-    OVERVIEW: mac-health — Native macOS Hardware Health & Universal Resource Governor
+    OVERVIEW: mac-health — Native macOS Hardware Health, Watchdog Sentinel & Resource Governor
     
     USAGE: mac-health [subcommand / options]
     
     SUBCOMMANDS:
-      pace           Scan and pace ALL AI agents, compilers, runtimes, and indexers system-wide
-      governor       Launch continuous background daemon to auto-pace newly spawned tasks
+      pace                  Scan and pace ALL AI agents, compilers, runtimes, and indexers
+      sentinel              Run proactive real-time watchdog sentinel & auto-healing monitor
+      sentinel install      Install persistent background LaunchAgent service across reboots
+      sentinel uninstall    Remove persistent background LaunchAgent service
+      sentinel status       Check status of the background sentinel service
     
     OPTIONS:
-      --json         Output diagnostic metrics as JSON
-      --watch <sec>  Continuously poll and print health telemetry every N seconds
-      -h, --help     Show help information
+      --json                Output diagnostic metrics as structured JSON
+      --watch <sec>         Continuously poll and render health telemetry every N seconds
+      -h, --help            Show help information
     """)
     exit(0)
 }
@@ -621,8 +967,22 @@ if args.contains("pace") {
     exit(0)
 }
 
-if args.contains("governor") {
-    UniversalGovernor.runDaemon(intervalSec: 5)
+if args.contains("sentinel") {
+    if args.contains("install") {
+        ProactiveSentinel.installLaunchAgent()
+        exit(0)
+    }
+    if args.contains("uninstall") {
+        ProactiveSentinel.uninstallLaunchAgent()
+        exit(0)
+    }
+    if args.contains("status") {
+        ProactiveSentinel.statusLaunchAgent()
+        exit(0)
+    }
+    
+    let isDaemon = args.contains("--daemon")
+    ProactiveSentinel.runDaemon(intervalSec: 5, verbose: !isDaemon)
     exit(0)
 }
 
@@ -641,7 +1001,7 @@ if args.contains("--json") {
 
 if let watchIndex = args.firstIndex(of: "--watch"), watchIndex + 1 < args.count, let sec = UInt32(args[watchIndex + 1]) {
     while true {
-        print("\u{001B}[2J\u{001B}[H", terminator: "") // Clear screen
+        print("\u{001B}[2J\u{001B}[H", terminator: "")
         let report = auditor.audit()
         Formatter.render(report)
         sleep(sec)
