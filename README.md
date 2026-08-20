@@ -55,6 +55,25 @@ mac-health sentinel uninstall
 ## Building from Source
 
 ```bash
-swiftc -O -framework CoreGraphics Sources/MacHealth/main.swift -o mac-health
-cp mac-health ~/.local/bin/mac-health
+swift build -c release
+cp .build/release/mac-health ~/.local/bin/mac-health
 ```
+
+## Release: Signing & Notarization
+
+```bash
+# Sign the binary (hardened runtime, required for notarization)
+codesign --force --options runtime --timestamp \
+  --sign "Developer ID Application: <NAME> (<TEAMID>)" .build/release/mac-health
+
+# Package and sign the dmg
+hdiutil create -volname mac-health -srcfolder dist/mac-health -format UDZO mac-health-<ver>.dmg
+codesign --force --timestamp --sign "Developer ID Application: <NAME> (<TEAMID>)" mac-health-<ver>.dmg
+
+# Notarize (one-time: xcrun notarytool store-credentials <profile>)
+xcrun notarytool submit mac-health-<ver>.dmg --keychain-profile <profile> --wait
+xcrun stapler staple mac-health-<ver>.dmg
+```
+
+See [ROADMAP.md](ROADMAP.md) for the plan to grow this into a general
+rescue daemon + CLI for dual-GPU Intel Macs.
