@@ -413,17 +413,21 @@ final class MacHealthAuditor {
             }
         }
         
+        // Diagnostic history on this machine (gpuRestart storms + WindowServer
+        // watchdog spins, Aug 2026): the AMD Radeon Pro 5300M (Navi14) is the
+        // component that faults (VMPT restarts), so any mode that engages the
+        // dGPU for the desktop is the risk — integrated-only is the safe state.
         let gpuSwitchMode: String
         let gpuSwitchSafe: Bool
         switch gpuSwitchVal {
-        case 1:
-            gpuSwitchMode = "Discrete Only (AMD Forced - Stable)"
-            gpuSwitchSafe = true
         case 0:
-            gpuSwitchMode = "Integrated Only (Low Power)"
+            gpuSwitchMode = "Integrated Only (iGPU - faulting AMD dGPU kept idle)"
             gpuSwitchSafe = true
+        case 1:
+            gpuSwitchMode = "Discrete Only (AMD Forced - Faulting GPU Engaged!)"
+            gpuSwitchSafe = false
         default:
-            gpuSwitchMode = "Dynamic Switching (Deadlock Risk)"
+            gpuSwitchMode = "Dynamic Switching (AMD dGPU Engaged)"
             gpuSwitchSafe = false
         }
         
@@ -669,7 +673,7 @@ final class MacHealthAuditor {
         let gpuOk = gpu.gpuSwitchSafe && gpu.activeIncidentsLastHour == 0
         if !gpuOk {
             if !gpu.gpuSwitchSafe {
-                recs.append("Dynamic GPU switching is active. Run 'pmset -a gpuswitch 1' to lock dedicated GPU and prevent WindowServer deadlocks.")
+                recs.append("The AMD Radeon 5300M is engaged for the desktop; it is the GPU that repeatedly faults (VMPT gpuRestarts -> WindowServer watchdog panics). Run 'sudo pmset -a gpuswitch 0' to keep the internal display on the Intel iGPU. Note: external displays are hardwired to the dGPU on this model.")
             }
             if gpu.activeIncidentsLastHour > 0 {
                 recs.append("GPU crashes/restarts occurred within the last hour.")
