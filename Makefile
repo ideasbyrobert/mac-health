@@ -43,9 +43,17 @@ test:
 clean:
 	swift package clean
 
+# A locally linked SwiftPM binary carries no signature on Intel, and launchd
+# items pointing at it show as "unidentified developer" in System Settings.
+# When the Developer ID identity is present, sign the installed copy so the
+# background items attribute correctly; elsewhere the plain copy still works.
 install: release
 	install -d $(PREFIX)/bin
 	install -m 0755 .build/release/mac-health $(PREFIX)/bin/mac-health
+	@if security find-identity -v -p codesigning 2>/dev/null | grep -Fq "$(APP_IDENTITY)"; then \
+		codesign --force --options runtime --timestamp --sign "$(APP_IDENTITY)" $(PREFIX)/bin/mac-health; \
+		echo "signed with: $(APP_IDENTITY)"; \
+	fi
 	@echo "installed $(PREFIX)/bin/mac-health"
 
 uninstall:
