@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-smoke:
+    name: build, test, smoke (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, macos-15]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The image default is not good enough: Package.swift declares
+      # swift-tools-version 6.0 and every test file imports Testing, so a
+      # default of Xcode 15.x (Swift 5.10) cannot even parse the manifest.
+      # Select the newest Xcode the image actually carries, then assert the
+      # toolchain is Swift 6+ so a future image change fails loudly here rather
+      # than as a confusing manifest error.
+      - name: Select a Swift 6 toolchain
+        run: |
+          set -euo pipefail
+          newest="$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)"
+          echo "selecting $newest"
+          sudo xcode-select --switch "$newest/Contents/Developer"
+          xcodebuild -version
+          swift --version
+          major="$(swift -version 2>&1 | sed -n 's/.*Swift version \([0-9]*\).*/\1/p' | head -n 1)"
+          if [ -z "$major" ] || [ "$major" -lt 6 ]; then
+            echo "need Swift 6 or newer, got: $(swift -version 2>&1 | head -n 1)" >&2
+            exit 1
+          fi
+
+      - name: Build (release)
+        run: swift build -c release
+
+      # `make test` and not `swift test`: on a machine with only the Command
+      # Line Tools it hands SwiftPM the Testing.framework paths that plain
+      # `swift test` cannot find. On these runners a full Xcode is present and
+      # the target degrades to `swift test`, so this exercises the supported
+      # entry point either way.
+      - name: Test
+        run: make test
+
+      - name: Smoke — version and help
+        run: |
+          set -euo pipefail
+          BIN=".build/release/mac-health"
+          test -x "$BIN"
+          "$BIN" --version
+          "$BIN" --help
+
+      # An audit reports the runner's own health through its exit code, so a
+      # degraded (1) or critical (2) VM is a legitimate result, not a CI
+      # failure. Anything outside 0/1/2 means the binary crashed or rejected
+      # its arguments and must fail the job.
+      - name: Smoke — audit honours the exit-code contract
+        run: |
+          set -euo pipefail
+          BIN=".build/release/mac-health"
+          status=0
+          "$BIN" --json > audit.json || status=$?
+          case "$status" in
+            0|1|2)
+              echo "audit exited $status (a health verdict)"
+              ;;
+            *)
+              echo "audit exited $status, which is not a health verdict" >&2
+              exit 1
+              ;;
+          esac
+          python3 - audit.json <<'PY'
+          import json, sys
+
+          report = json.load(open(sys.argv[1]))
+          required = [
+              "schemaVersion", "toolVersion", "timestamp", "overallHealth",
+              "cpu", "memory", "gpu", "windowServer", "power", "disk",
+              "kernelExtensions", "xcodeReadiness",
+          ]
+          missing = [key for key in required if key not in report]
+          if missing:
+              sys.exit("missing top-level keys: %s" % ", ".join(missing))
+          if not isinstance(report["schemaVersion"], int):
+              sys.exit("schemaVersion must be an integer")
+          gpu = report["gpu"]
+          attributed = sum(gpu["incidentsByGPU"].values())
+          if attributed + gpu["unattributedIncidents"] != gpu["historicalIncidents24h"]:
+              sys.exit("incident counts do not add up to historicalIncidents24h")
+          print("schemaVersion %d, verdict %s" % (report["schemaVersion"], report["overallHealth"]))
+          PY
+
+      - name: Smoke — usage errors exit 64
+        run: |
+          set -euo pipefail
+          BIN=".build/release/mac-health"
+          status=0
+          "$BIN" --watch || status=$?
+          if [ "$status" -ne 64 ]; then
+            echo "--watch without an interval exited $status, expected 64" >&2
+            exit 1
+          fi

@@ -1,17 +1,38 @@
 # mac-health
 
-A high-performance, native Swift CLI utility and proactive background sentinel to audit macOS hardware health, probe `WindowServer` latency, prevent GPU switching deadlocks and userspace watchdog panics, govern resource hogs, and ensure compilation readiness.
+A native Swift CLI that reads a Mac's own diagnostic reports and tells you,
+with evidence, which component they blame — then probes `WindowServer` latency,
+audits GPU mux state, battery, thermals, kexts and disk, and emits the whole
+verdict as JSON with meaningful exit codes.
+
+Its primary job is **diagnosis**: turning "my Mac panicked and I don't know why"
+into "twenty `.gpuRestart` reports name your AMD Radeon Pro 5300M on the VMPT
+channel, and then the watchdog fired." An optional background sentinel is also
+included; see the honest caveat on it below.
 
 ---
 
 ## Key Features
 
 - **WindowServer & Watchdog Health Probe**: Proactively probes `WindowServer` Mach IPC round-trip latency via CoreGraphics to detect display compositor stalls long before the 120-second kernel watchdog triggers.
-- **GPU Stability & Hardware Mux Audit**: Inspects discrete vs. dynamic GPU multiplexing (`gpuswitch`) and scans `/Library/Logs/DiagnosticReports/` for panics, `.gpuRestart`, `.spin`, and shutdown stalls across 24-hour windows.
+- **Evidence-Based GPU Fault Attribution**: Reads the machine's actual GPU complement from `system_profiler SPDisplaysDataType`, scans `/Library/Logs/DiagnosticReports/` for `.panic`, `.gpuRestart`, `.spin`, and `.shutdownStall` reports across a 24-hour window, and attributes each report to the GPU it names — the `Graphics Hardware:` header line first, then a known device name, then the driver bundle in a panic backtrace. Nothing is blamed without an artifact naming it; reports that name no hardware are counted separately as unattributed.
+- **Hardware Mux Safety Verdict**: Inspects `gpuswitch` and judges the current mode against that evidence: a mode is unsafe only when it engages a GPU this machine's own reports have blamed. A healthy dual-GPU Mac stays green in every mode, and a machine whose *integrated* part is faulting is told to force the discrete GPU — the opposite of the AMD-specific advice this project started with.
 - **Kernel & Extension Integrity**: Audits loaded kernel extensions (`kmutil`) for legacy, crash-prone third-party kexts (e.g. `DisableTurboBoost`).
 - **Battery Health & Sleep Timers**: Evaluates battery condition degradation (`Service Recommended`) and validates display vs. system sleep timer coherency to prevent sleep-wake race conditions.
-- **Universal Resource Governor**: Automatically paces heavy background AI agents (`claude`, `agy`, `antigravity`, `node`), compilers (`swiftc`, `clang`, `xcodebuild`), and indexers (`mdworker`, `rg`) using non-destructive background QoS (`taskpolicy -b`, which includes throttled disk I/O) and `renice +15`.
-- **Proactive Sentinel Daemon**: A lightweight background sentinel service (PID managed via `LaunchAgent`) that continuously monitors `WindowServer` latency and thermal throttling, automatically shedding system contention to keep interactive UI responsive and prevent panics.
+- **Universal Resource Governor**: Paces heavy background AI agents (`claude`, `agy`, `antigravity`, `node`), compilers (`swiftc`, `clang`, `xcodebuild`), and indexers (`mdworker`, `rg`) using non-destructive background QoS (`taskpolicy -b`, which includes throttled disk I/O) and `renice +15`. It never kills anything and never touches interactive apps.
+- **Proactive Sentinel Daemon** (experimental, opt-in): A background service
+  (`LaunchAgent`) that samples `WindowServer` latency and thermal pressure and
+  paces batch workloads when either rises.
+
+  > **What this does and does not claim.** Pacing background load measurably
+  > reduces CPU contention, and that is all it is demonstrated to do. The idea
+  > that it *prevents GPU restart storms or watchdog panics* is a hypothesis,
+  > not a validated result: the gpuRestarts this project was built around fault
+  > on the GPU's page-table (VMPT) channel, and nothing in the collected
+  > evidence shows CPU contention triggers them. The mitigation that does
+  > correlate with the storms stopping is the mux change (`pmset -a gpuswitch`),
+  > which is a one-line command and needs no daemon. Run the sentinel if you
+  > want the pacing and the logging; do not run it expecting a cure.
 
 ---
 
@@ -28,6 +49,22 @@ mac-health --json
 # Continuous live terminal dashboard (refreshes every 2s)
 mac-health --watch 2
 ```
+
+An audit reports its verdict through the process exit code, so a script can
+branch on it without parsing anything:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | `OPTIMAL` |
+| `1` | `DEGRADED_OR_WARNING` |
+| `2` | `CRITICAL_ATTENTION_NEEDED` |
+| `64` | Usage error |
+| `70` | The report could not be encoded to JSON |
+
+`--version`, `--help`, `pace`, and the `sentinel` subcommands exit `0`; the
+`--watch` dashboard runs until interrupted and carries no verdict. The full
+field-by-field contract for `--json` is in
+[docs/json-schema.md](docs/json-schema.md).
 
 ### 2. Resource Governance
 ```bash
@@ -52,12 +89,44 @@ mac-health sentinel uninstall
 
 ---
 
+## Layout
+
+The package splits into a library and a thin executable:
+
+- **`MacHealthKit`** — every auditor, the governor, the sentinel policy, and
+  the console renderer. The parsers take their input as strings and their
+  system access through the `CommandRunning` and `FileReading` protocols, which
+  is what lets the tests drive an entire Intel failure workflow off recorded
+  fixtures.
+- **`MacHealthCLI`** — argument handling and exit codes, and nothing else.
+  It produces the `mac-health` binary.
+
+---
+
 ## Building from Source
 
+`make` is the supported path:
+
 ```bash
-swift build -c release
-cp .build/release/mac-health ~/.local/bin/mac-health
+make build          # debug build
+make release        # optimized build at .build/release/mac-health
+make test           # run the test suite
+make install        # install to $PREFIX/bin (PREFIX defaults to ~/.local)
+make uninstall      # remove it again
+make clean
 ```
+
+**Use `make test`, not `swift test`.** Swift Testing ships inside the Command
+Line Tools at a path SwiftPM only discovers through an Xcode platform
+directory, so on a machine with no full Xcode `swift test` fails with
+`no such module 'Testing'`. The `test` target detects that case and hands
+SwiftPM the framework and interop-dylib paths directly; with a full Xcode
+installed it degrades to a plain `swift test`.
+
+CI (`.github/workflows/ci.yml`) runs the release build, `make test`, and a
+smoke pass of the shipped binary on macOS 14 and macOS 15 runners. The smoke
+pass accepts exit codes `0`, `1`, and `2` from an audit, since those report the
+runner's health rather than a build failure.
 
 ## Release: Signing & Notarization
 
@@ -75,5 +144,14 @@ xcrun notarytool submit mac-health-<ver>.dmg --keychain-profile <profile> --wait
 xcrun stapler staple mac-health-<ver>.dmg
 ```
 
-See [ROADMAP.md](ROADMAP.md) for the plan to grow this into a general
-rescue daemon + CLI for dual-GPU Intel Macs.
+## Documentation
+
+- [docs/json-schema.md](docs/json-schema.md) — the `--json` contract: every
+  field, its units, the `schemaVersion` compatibility rule, the exit-code
+  table, and a worked example payload.
+- [docs/incident-playbooks.md](docs/incident-playbooks.md) — "WindowServer
+  watchdog panic", "gpuRestart storm", and "mux deadlock": the evidence to
+  collect, what mac-health reports, the mitigation and why, and how to
+  reverse it.
+- [ROADMAP.md](ROADMAP.md) — the plan to grow this into a general rescue
+  daemon + CLI for dual-GPU Intel Macs.
