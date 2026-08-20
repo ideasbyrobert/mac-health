@@ -22,6 +22,10 @@ if args.contains("--help") || args.contains("-h") {
       energy watch <pid>    Diagnose a live process from its kernel counters
       energy top [sec]      Rank every live process by the energy it is consuming
       pace                  Scan and pace ALL AI agents, compilers, runtimes, and indexers
+      sleep never           Keep the Mac fully awake: system and display never sleep
+      sleep dim             Keep the system awake while the display may still sleep
+      sleep canonical       Return to the Mac's own configured sleep behavior
+      sleep status          Show the engaged mode, held assertions, and configured timers
       sentinel              Run proactive real-time watchdog sentinel & auto-healing monitor
       sentinel install      Install persistent background LaunchAgent service across reboots
       sentinel uninstall    Remove persistent background LaunchAgent service
@@ -49,6 +53,10 @@ if args.contains("energy") {
 if args.contains("pace") {
     UniversalGovernor().paceAll(verbose: true)
     exit(0)
+}
+
+if args.contains("sleep") {
+    exit(SleepCommand.run(Array(args.drop { $0 != "sleep" }.dropFirst())))
 }
 
 if args.contains("sentinel") {

@@ -22,7 +22,12 @@ PREFIX ?= $(HOME)/.local
 APP_NAME := Energy Lab
 APP_DIR := dist/$(APP_NAME).app
 
-.PHONY: all build release test clean install uninstall app lab
+VERSION := $(shell sed -n 's/^public let macHealthVersion = "\(.*\)"$$/\1/p' Sources/MacHealthKit/Core/Version.swift)
+APP_IDENTITY ?= Developer ID Application: ROBERT KARAPETYAN (X87D35HM5V)
+NOTARY_PROFILE ?= AC_NOTARY
+DIST_DMG := dist/mac-health-$(VERSION).dmg
+
+.PHONY: all build release test clean install uninstall app lab notarized
 
 all: build
 
@@ -72,3 +77,24 @@ app: release
 	  '  <key>NSHighResolutionCapable</key><true/>' \
 	  '</dict></plist>' > "$(APP_DIR)/Contents/Info.plist"
 	@echo "built $(APP_DIR) — open it with: open \"$(APP_DIR)\""
+
+# ROADMAP §4: Developer ID-signed binary (hardened runtime, timestamped),
+# notarized DMG, stapled ticket, and a Gatekeeper verdict before anything
+# lands in dist/. The submit status is parsed rather than trusted: notarytool
+# can exit 0 for an Invalid submission it merely finished waiting on.
+notarized: release
+	codesign --force --options runtime --timestamp --sign "$(APP_IDENTITY)" .build/release/mac-health
+	codesign --verify --strict --verbose=2 .build/release/mac-health
+	rm -rf dist/dmg-stage
+	mkdir -p dist/dmg-stage
+	cp .build/release/mac-health dist/dmg-stage/mac-health
+	hdiutil create -volname mac-health -srcfolder dist/dmg-stage -ov -format UDZO "$(DIST_DMG)" >/dev/null
+	codesign --force --timestamp --sign "$(APP_IDENTITY)" "$(DIST_DMG)"
+	@status=$$(xcrun notarytool submit "$(DIST_DMG)" --keychain-profile "$(NOTARY_PROFILE)" --wait --output-format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'); \
+	echo "notarization: $$status"; [ "$$status" = "Accepted" ]
+	xcrun stapler staple "$(DIST_DMG)"
+	xcrun stapler validate "$(DIST_DMG)"
+	spctl -a -t open --context context:primary-signature -v "$(DIST_DMG)"
+	shasum -a 256 "$(DIST_DMG)"
+	rm -rf dist/dmg-stage
+	@echo "notarized $(DIST_DMG)"

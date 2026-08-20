@@ -135,6 +135,28 @@ mac-health sentinel status
 mac-health sentinel uninstall
 ```
 
+### 5. Sleep Guard
+```bash
+# Keep the Mac fully awake: system and display never sleep
+mac-health sleep never
+
+# Keep the system awake while the display may still sleep
+mac-health sleep dim
+
+# Return to the Mac's own configured sleep behavior
+mac-health sleep canonical
+
+# Show the engaged mode, held assertions, and configured timers
+mac-health sleep status
+```
+
+The guard holds IOKit power assertions from a LaunchAgent, so it survives
+logout and reboot until told otherwise. It never edits `pmset`: the machine's
+own timers remain the untouched canonical configuration, and `sleep canonical`
+restores them by dropping the assertions rather than replaying saved values.
+Closing the lid still sleeps the Mac; only `sudo pmset -a disablesleep 1`
+changes that, and mac-health does not run sudo.
+
 ---
 
 ## Layout
@@ -173,6 +195,7 @@ make install        # install to $PREFIX/bin (PREFIX defaults to ~/.local)
 make uninstall      # remove it again
 make lab            # build, then run every chaos scenario
 make app            # bundle the SwiftUI app into dist/Energy Lab.app
+make notarized      # Developer ID-signed, notarized, stapled DMG in dist/
 make clean
 ```
 
