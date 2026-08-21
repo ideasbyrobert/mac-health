@@ -7,6 +7,41 @@ public struct UniversalGovernor {
         public let patterns: [String]
         public let niceLevel: Int
         public let backgroundQoS: Bool
+
+        /// Whether processes matching this rule mostly supervise other work
+        /// rather than perform it.
+        ///
+        /// This matters because both controls are inherited by children, but
+        /// only one of them can be taken back. `taskpolicy -B` lifts the
+        /// background policy without privilege; lowering a nice value needs
+        /// root, so an unprivileged governor can raise a process's nice and
+        /// then never undo it.
+        ///
+        /// An agent CLI is long lived and mostly idle: the CPU is burned by
+        /// the compilers and test runners it launches. Nicing the supervisor
+        /// therefore hands every future child a penalty it never earned, and
+        /// any intermediate shell belongs to no rule at all, so it keeps the
+        /// inherited value and passes it on. That is how a release compiler
+        /// ends up two tiers below where this table says compilers belong.
+        public let supervisesChildren: Bool
+
+        public init(
+            category: String,
+            patterns: [String],
+            niceLevel: Int,
+            backgroundQoS: Bool,
+            supervisesChildren: Bool = false
+        ) {
+            self.category = category
+            self.patterns = patterns
+            self.niceLevel = niceLevel
+            self.backgroundQoS = backgroundQoS
+            self.supervisesChildren = supervisesChildren
+        }
+
+        /// Supervisors get only the reversible control, so a build they spawn
+        /// starts at the priority its own rule assigns.
+        public var appliesNice: Bool { !supervisesChildren }
     }
 
     public static let rules: [GovernanceRule] = [
@@ -14,7 +49,8 @@ public struct UniversalGovernor {
             category: "AI Agents & LLM Runtimes",
             patterns: ["claude", "agy", "antigravity", "codex", "ollama", "node", "python", "python3", "bun"],
             niceLevel: 15,
-            backgroundQoS: true
+            backgroundQoS: true,
+            supervisesChildren: true
         ),
         GovernanceRule(
             category: "Compilers & Heavy Toolchains",
@@ -79,20 +115,29 @@ public struct UniversalGovernor {
                         // does not support applying -d to an existing pid.
                         shell.run("taskpolicy -b -p \(pid) 2>/dev/null")
                     }
-                    shell.run("renice +\(rule.niceLevel) -p \(pid) 2>/dev/null")
+                    if rule.appliesNice {
+                        shell.run("renice +\(rule.niceLevel) -p \(pid) 2>/dev/null")
+                    }
+
+                    // Report what was applied, not what the rule wished for: a
+                    // supervisor keeps whatever nice it already had.
+                    let appliedNice = rule.appliesNice ? rule.niceLevel : currentNice(of: pid)
 
                     let item = PacedProcessResult(
                         pid: pid,
                         name: procName.isEmpty ? pattern : procName,
                         category: rule.category,
-                        nice: rule.niceLevel,
+                        nice: appliedNice,
                         qos: rule.backgroundQoS ? "Background" : "Utility"
                     )
                     results.append(item)
 
                     if verbose {
+                        let priority = rule.appliesNice
+                            ? "\(ConsoleFormat.yellow)nice +\(rule.niceLevel)\(ConsoleFormat.reset)"
+                            : "\(ConsoleFormat.dim)nice unchanged (supervises children)\(ConsoleFormat.reset)"
                         print("  \(ConsoleFormat.green)\(ConsoleFormat.tick)\(ConsoleFormat.reset) Paced PID \(ConsoleFormat.bold)\(pid)\(ConsoleFormat.reset) (\(item.name)) → [\(rule.category)]")
-                        print("    \(ConsoleFormat.arrow) Priority: \(ConsoleFormat.yellow)nice +\(rule.niceLevel)\(ConsoleFormat.reset) | QoS: \(ConsoleFormat.cyan)\(item.qos)\(ConsoleFormat.reset)\(rule.backgroundQoS ? " | Disk I/O: \(ConsoleFormat.blue)Throttled (BG policy)\(ConsoleFormat.reset)" : "")")
+                        print("    \(ConsoleFormat.arrow) Priority: \(priority) | QoS: \(ConsoleFormat.cyan)\(item.qos)\(ConsoleFormat.reset)\(rule.backgroundQoS ? " | Disk I/O: \(ConsoleFormat.blue)Throttled (BG policy)\(ConsoleFormat.reset)" : "")")
                     }
                 }
             }
@@ -172,6 +217,13 @@ public struct UniversalGovernor {
         }
 
         return paced
+    }
+
+    /// The nice a process actually carries, so a report never claims a change
+    /// that was not made. Unreadable means unchanged, which is 0.
+    func currentNice(of pid: Int) -> Int {
+        Int(shell.run("ps -o nice= -p \(pid) 2>/dev/null").output
+            .trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
     }
 
     public static let runawayCategory = "Sustained CPU Runaways"
