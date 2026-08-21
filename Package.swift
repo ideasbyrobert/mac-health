@@ -35,14 +35,6 @@ let package = Package(
             dependencies: [],
             path: "Sources/ChaosWorker"
         ),
-        // Built into a real .app bundle by `make app`; SwiftPM alone produces a
-        // bare executable with no bundle identity.
-        .executableTarget(
-            name: "EnergyLabApp",
-            dependencies: ["MacHealthKit", "EnergyLab"],
-            path: "Sources/EnergyLabApp",
-            swiftSettings: [.swiftLanguageMode(.v5)]
-        ),
         .executableTarget(
             name: "MacHealthCLI",
             dependencies: ["MacHealthKit", "EnergyLab"],

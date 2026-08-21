@@ -54,18 +54,18 @@ public struct SleepGuard {
             let headline = mode == .never
                 ? "Sleep Guard Engaged: the Mac will not sleep, and the display stays on."
                 : "Sleep Guard Engaged: the system stays awake; the display may still sleep."
-            print("\n\(ConsoleFormat.green)✓ \(headline)\(ConsoleFormat.reset)")
-            print("  • Mode:            \(mode.rawValue)")
-            print("  • Assertions:      \(SleepPolicy.assertionTypes(for: mode).joined(separator: ", "))")
-            print("  • Plist Location:  \(agentPlistPath)")
-            print("  • Binary Path:     \(resolvedBinary)")
+            print("\n\(ConsoleFormat.green)\(ConsoleFormat.tick) \(headline)\(ConsoleFormat.reset)")
+            print("  \(ConsoleFormat.bullet) Mode:            \(mode.rawValue)")
+            print("  \(ConsoleFormat.bullet) Assertions:      \(SleepPolicy.assertionTypes(for: mode).joined(separator: ", "))")
+            print("  \(ConsoleFormat.bullet) Plist Location:  \(agentPlistPath)")
+            print("  \(ConsoleFormat.bullet) Binary Path:     \(resolvedBinary)")
             if bootstrap.exitCode == 0 {
-                print("  • Status:          Holding (survives logout and reboot)")
+                print("  \(ConsoleFormat.bullet) Status:          Holding (survives logout and reboot)")
             } else {
-                print("  • Status:          \(ConsoleFormat.yellow)Bootstrap failed — \(bootstrap.output)\(ConsoleFormat.reset)")
-                print("    ↳ If running over SSH, run: launchctl bootstrap gui/\(uid) '\(agentPlistPath)' from a GUI terminal session.")
+                print("  \(ConsoleFormat.bullet) Status:          \(ConsoleFormat.yellow)Bootstrap failed — \(bootstrap.output)\(ConsoleFormat.reset)")
+                print("    \(ConsoleFormat.arrow) If running over SSH, run: launchctl bootstrap gui/\(uid) '\(agentPlistPath)' from a GUI terminal session.")
             }
-            print("  • Restore:         mac-health sleep canonical")
+            print("  \(ConsoleFormat.bullet) Restore:         mac-health sleep canonical")
             print("  \(ConsoleFormat.cyan)Note: closing the lid still sleeps the Mac; only 'sudo pmset -a disablesleep 1'")
             print("  changes that, and mac-health does not run sudo.\(ConsoleFormat.reset)\n")
         } catch {
@@ -80,7 +80,7 @@ public struct SleepGuard {
         shell.run("pkill -f '[m]ac-health sleep hold' 2>/dev/null")
         try? FileManager.default.removeItem(atPath: agentPlistPath)
 
-        print("\n\(ConsoleFormat.green)✓ Canonical sleep behavior restored.\(ConsoleFormat.reset)")
+        print("\n\(ConsoleFormat.green)\(ConsoleFormat.tick) Canonical sleep behavior restored.\(ConsoleFormat.reset)")
         print("  The guard held assertions instead of editing pmset, so the timers below")
         print("  were never changed and are simply back in force:\n")
         printConfiguredTimers(indent: "  ")
@@ -95,21 +95,21 @@ public struct SleepGuard {
             .components(separatedBy: .newlines).filter { !$0.isEmpty }
 
         print("\n\(ConsoleFormat.bold)😴 mac-health Sleep Guard Status\(ConsoleFormat.reset)")
-        print("\(ConsoleFormat.cyan)────────────────────────────────────────────────────────────\(ConsoleFormat.reset)")
+        print(ConsoleFormat.rule())
         switch mode {
         case .canonical:
-            print("  • Mode:            \(ConsoleFormat.green)canonical\(ConsoleFormat.reset) (the Mac follows its own configured timers)")
+            print("  \(ConsoleFormat.bullet) Mode:            \(ConsoleFormat.green)canonical\(ConsoleFormat.reset) (the Mac follows its own configured timers)")
         case .never:
-            print("  • Mode:            \(ConsoleFormat.yellow)never\(ConsoleFormat.reset) (system and display are pinned awake)")
+            print("  \(ConsoleFormat.bullet) Mode:            \(ConsoleFormat.yellow)never\(ConsoleFormat.reset) (system and display are pinned awake)")
         case .dim:
-            print("  • Mode:            \(ConsoleFormat.yellow)dim\(ConsoleFormat.reset) (system pinned awake; display may sleep)")
+            print("  \(ConsoleFormat.bullet) Mode:            \(ConsoleFormat.yellow)dim\(ConsoleFormat.reset) (system pinned awake; display may sleep)")
         }
         if mode != .canonical {
-            print("  • Agent Plist:     \(agentPlistPath)")
+            print("  \(ConsoleFormat.bullet) Agent Plist:     \(agentPlistPath)")
             if holderPids.isEmpty {
-                print("  • Holder Process:  \(ConsoleFormat.red)Not running\(ConsoleFormat.reset) (launchd should respawn it; see \(logPath))")
+                print("  \(ConsoleFormat.bullet) Holder Process:  \(ConsoleFormat.red)Not running\(ConsoleFormat.reset) (launchd should respawn it; see \(logPath))")
             } else {
-                print("  • Holder Process:  \(ConsoleFormat.green)Active (PID: \(holderPids.joined(separator: ", ")))\(ConsoleFormat.reset)")
+                print("  \(ConsoleFormat.bullet) Holder Process:  \(ConsoleFormat.green)Active (PID: \(holderPids.joined(separator: ", ")))\(ConsoleFormat.reset)")
             }
         }
 
@@ -119,19 +119,19 @@ public struct SleepGuard {
                 .first(where: { $0.contains(type) && !$0.contains("named:") }) {
                 let active = line.trimmingCharacters(in: .whitespaces).hasSuffix("1")
                 let tint = active ? ConsoleFormat.yellow : ConsoleFormat.green
-                print("  • \(type): \(tint)\(active ? "held" : "clear")\(ConsoleFormat.reset)")
+                print("  \(ConsoleFormat.bullet) \(type): \(tint)\(active ? "held" : "clear")\(ConsoleFormat.reset)")
             }
         }
 
         print("\n  Canonical timers (pmset, untouched by the guard):")
         printConfiguredTimers(indent: "  ")
-        print("\(ConsoleFormat.cyan)────────────────────────────────────────────────────────────\(ConsoleFormat.reset)\n")
+        print(ConsoleFormat.rule() + "\n")
     }
 
     static func printConfiguredTimers(indent: String) {
         let power = PowerAuditor(shell: shell).audit()
-        print("\(indent)• AC Power:        system sleep \(describeMinutes(power.acSleepMinutes)), display sleep \(describeMinutes(power.acDisplaySleepMinutes))")
-        print("\(indent)• Battery Power:   system sleep \(describeMinutes(power.batterySleepMinutes)), display sleep \(describeMinutes(power.batteryDisplaySleepMinutes))")
+        print("\(indent)\(ConsoleFormat.bullet) AC Power:        system sleep \(describeMinutes(power.acSleepMinutes)), display sleep \(describeMinutes(power.acDisplaySleepMinutes))")
+        print("\(indent)\(ConsoleFormat.bullet) Battery Power:   system sleep \(describeMinutes(power.batterySleepMinutes)), display sleep \(describeMinutes(power.batteryDisplaySleepMinutes))")
     }
 
     static func describeMinutes(_ minutes: Int) -> String {

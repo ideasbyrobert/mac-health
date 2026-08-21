@@ -1,13 +1,40 @@
 import Foundation
 
 public struct ConsoleFormat {
-    public static let green = "\u{001B}[32m"
-    public static let yellow = "\u{001B}[33m"
-    public static let red = "\u{001B}[31m"
-    public static let blue = "\u{001B}[34m"
-    public static let cyan = "\u{001B}[36m"
-    public static let bold = "\u{001B}[1m"
-    public static let reset = "\u{001B}[0m"
+
+    /// Overridable so tests can render against a chosen terminal instead of
+    /// whatever the machine running them happens to have.
+    public nonisolated(unsafe) static var capabilities: TerminalCapabilities = .current
+
+    // Every style resolves through `capabilities`, so a redirected stream gets
+    // the same text without a single escape byte in it.
+    private static func code(_ sequence: String) -> String {
+        capabilities.usesColor ? sequence : ""
+    }
+
+    public static var green: String { code("\u{001B}[32m") }
+    public static var yellow: String { code("\u{001B}[33m") }
+    public static var red: String { code("\u{001B}[31m") }
+    public static var blue: String { code("\u{001B}[34m") }
+    public static var cyan: String { code("\u{001B}[36m") }
+    public static var dim: String { code("\u{001B}[2m") }
+    public static var bold: String { code("\u{001B}[1m") }
+    public static var reset: String { code("\u{001B}[0m") }
+
+    /// A horizontal rule the width of the terminal rather than a fixed sixty
+    /// columns, which wrapped on a narrow pane and stranded a short line on a
+    /// wide one.
+    public static func rule() -> String {
+        let glyph = capabilities.usesUnicode ? "\u{2500}" : "-"
+        return cyan + String(repeating: glyph, count: capabilities.width) + reset
+    }
+
+    /// Status glyphs degrade to ASCII where UTF-8 is not promised.
+    public static var tick: String { capabilities.usesUnicode ? "\u{2713}" : "OK" }
+    public static var warn: String { capabilities.usesUnicode ? "\u{25B2}" : "!" }
+    public static var fail: String { capabilities.usesUnicode ? "\u{25A0}" : "X" }
+    public static var bullet: String { capabilities.usesUnicode ? "\u{2022}" : "-" }
+    public static var arrow: String { capabilities.usesUnicode ? "\u{21B3}" : ">" }
 
     public static func timeString(_ date: Date) -> String {
         let df = DateFormatter()
@@ -20,7 +47,7 @@ public struct ConsoleFormat {
 
     private static func row(_ label: String, _ value: String) -> String {
         let padding = max(labelWidth - label.count, 1)
-        return "   • \(label)\(String(repeating: " ", count: padding))\(value)"
+        return "   \(bullet) \(label)\(String(repeating: " ", count: padding))\(value)"
     }
 
     private static func plural(_ count: Int, _ noun: String) -> String {
@@ -45,23 +72,23 @@ public struct ConsoleFormat {
             lines.append(row("Installed GPUs:", devices))
         }
 
-        // Printing "✓ 0 Crashes" when nothing was scanned would be the most
+        // Printing "\(tick) 0 Crashes" when nothing was scanned would be the most
         // dangerous line this tool could emit, so the unknown state replaces it
         // rather than sitting beside it.
         if !gpu.incidentScanAvailable {
-            lines.append(row("Incident Scan:", "\(yellow)⚠ Unavailable — cannot read \(GPUAuditor.reportsDirectory)\(reset)"))
+            lines.append(row("Incident Scan:", "\(yellow)\(warn) Unavailable — cannot read \(GPUAuditor.reportsDirectory)\(reset)"))
             lines.append(row("Active State:", "\(yellow)Unknown (not scanned — this is not an all-clear)\(reset)"))
             return lines
         }
 
         if gpu.activeIncidentsLastHour == 0 {
             let hoursStr = String(format: "%.1f", gpu.hoursSinceLastCrash)
-            lines.append(row("Active State:", "\(green)✓ 0 Crashes in last \(hoursStr)h\(reset)"))
+            lines.append(row("Active State:", "\(green)\(tick) 0 Crashes in last \(hoursStr)h\(reset)"))
             if gpu.historicalIncidents24h > 0, let time = gpu.latestIncidentTime, let name = gpu.latestIncidentName {
                 lines.append(row("24h History:", "\(yellow)\(gpu.historicalIncidents24h) prior incidents recorded (last: \(name) at \(time))\(reset)"))
             }
         } else {
-            lines.append(row("Active State:", "\(red)⚠ \(gpu.activeIncidentsLastHour) crashes in past hour!\(reset)"))
+            lines.append(row("Active State:", "\(red)\(warn) \(gpu.activeIncidentsLastHour) crashes in past hour!\(reset)"))
         }
 
         if let faulting = gpu.faultingGPU {
@@ -99,25 +126,25 @@ public struct ConsoleFormat {
 
     public static func render(_ report: DiagnosticReport) {
         print("\n\(bold)🍎 macOS Hardware Health & Watchdog Guard Audit\(reset)")
-        print("\(cyan)────────────────────────────────────────────────────────────\(reset)")
+        print(rule())
 
         switch report.overallHealth {
         case "OPTIMAL":
             print("  System Status:  \(green)\(bold)● OPTIMAL (All Guardrails Active & Stable)\(reset)")
         case "DEGRADED_OR_WARNING":
-            print("  System Status:  \(yellow)\(bold)▲ ATTENTION / DEGRADED (Check Warnings Below)\(reset)")
+            print("  System Status:  \(yellow)\(bold)\(warn) ATTENTION / DEGRADED (Check Warnings Below)\(reset)")
         default:
-            print("  System Status:  \(red)\(bold)■ CRITICAL ATTENTION REQUIRED\(reset)")
+            print("  System Status:  \(red)\(bold)\(fail) CRITICAL ATTENTION REQUIRED\(reset)")
         }
         print("  Audit Time:     \(report.timestamp)")
-        print("\(cyan)────────────────────────────────────────────────────────────\(reset)\n")
+        print(rule() + "\n")
 
         // 1. WindowServer & Watchdog Health
         print("\(bold)1. WindowServer Compositor & Watchdog Probe\(reset)")
         let wsColor = report.windowServer.isResponsive ? (report.windowServer.latencyMs < 200 ? green : yellow) : red
-        print("   • IPC Latency:      \(wsColor)\(String(format: "%.1f", report.windowServer.latencyMs)) ms\(reset) \(report.windowServer.isResponsive ? "✓ Responsive" : "⚠ Stall Detected")")
-        print("   • CPU Utilization:  \(String(format: "%.1f", report.windowServer.cpuPercent))%")
-        print("   • Sleep Assertion:  \(report.windowServer.sleepAssertionHolder ? "Active" : "None")")
+        print("   \(bullet) IPC Latency:      \(wsColor)\(String(format: "%.1f", report.windowServer.latencyMs)) ms\(reset) \(report.windowServer.isResponsive ? "\(tick) Responsive" : "\(warn) Stall Detected")")
+        print("   \(bullet) CPU Utilization:  \(String(format: "%.1f", report.windowServer.cpuPercent))%")
+        print("   \(bullet) Sleep Assertion:  \(report.windowServer.sleepAssertionHolder ? "Active" : "None")")
 
         // 2. GPU Power & Mux Stability
         print("\n\(bold)2. GPU Stability & Hardware Mux State\(reset)")
@@ -127,49 +154,49 @@ public struct ConsoleFormat {
 
         // 3. Power & Battery Health
         print("\n\(bold)3. Power, Battery & Sleep Timings\(reset)")
-        print("   • Source:           \(report.power.powerSource == "AC Charger" ? "\(green)🔌 AC Power\(reset)" : "\(yellow)🔋 Battery\(reset)")")
+        print("   \(bullet) Source:           \(report.power.powerSource == "AC Charger" ? "\(green)🔌 AC Power\(reset)" : "\(yellow)🔋 Battery\(reset)")")
         let battCondColor = report.power.isBatteryDegraded ? red : green
-        print("   • Battery Level:    \(report.power.batteryPercentage)% (\(battCondColor)\(report.power.batteryCondition)\(reset))")
+        print("   \(bullet) Battery Level:    \(report.power.batteryPercentage)% (\(battCondColor)\(report.power.batteryCondition)\(reset))")
         let sleepTimingColor = report.power.sleepTimingsCoherent ? green : red
         let isAC = report.power.powerSource == "AC Charger"
         let dispSleep = isAC ? report.power.acDisplaySleepMinutes : report.power.batteryDisplaySleepMinutes
         let sysSleep = isAC ? report.power.acSleepMinutes : report.power.batterySleepMinutes
-        print("   • Sleep Timers:     \(sleepTimingColor)Display: \(dispSleep)m / Sleep: \(sysSleep)m \(report.power.sleepTimingsCoherent ? "✓ Coherent" : "⚠ Inverted Order")\(reset)")
+        print("   \(bullet) Sleep Timers:     \(sleepTimingColor)Display: \(dispSleep)m / Sleep: \(sysSleep)m \(report.power.sleepTimingsCoherent ? "\(tick) Coherent" : "\(warn) Inverted Order")\(reset)")
 
         // 4. Kernel Extensions & Cleanliness
         print("\n\(bold)4. Kernel Integrity & Third-Party Extensions\(reset)")
         if report.kernelExtensions.isCleanNative {
-            print("   • Native State:     \(green)✓ 100% Clean (0 Unsafe Third-Party Kexts)\(reset)")
+            print("   \(bullet) Native State:     \(green)\(tick) 100% Clean (0 Unsafe Third-Party Kexts)\(reset)")
         } else {
-            print("   • Non-Apple Kexts:  \(red)⚠ \(report.kernelExtensions.nonAppleKextsCount) detected: \(report.kernelExtensions.nonAppleKextNames.joined(separator: ", "))\(reset)")
+            print("   \(bullet) Non-Apple Kexts:  \(red)\(warn) \(report.kernelExtensions.nonAppleKextsCount) detected: \(report.kernelExtensions.nonAppleKextNames.joined(separator: ", "))\(reset)")
         }
 
         // 5. CPU & Thermal State
         print("\n\(bold)5. CPU & Thermal Headroom\(reset)")
-        print("   • Model:            \(report.cpu.model)")
-        print("   • Cores:            \(report.cpu.physicalCores) Physical / \(report.cpu.logicalCores) Virtual")
+        print("   \(bullet) Model:            \(report.cpu.model)")
+        print("   \(bullet) Cores:            \(report.cpu.physicalCores) Physical / \(report.cpu.logicalCores) Virtual")
         let speedColor = report.cpu.speedLimitPercent == 100 ? green : red
-        print("   • CPU Speed Limit:  \(speedColor)\(report.cpu.speedLimitPercent)%\(reset) \(report.cpu.speedLimitPercent == 100 ? "✓ Full Speed" : "⚠ Throttled")")
-        print("   • Thermal State:    \(report.cpu.thermalWarning ? "\(red)⚠ Warning Recorded\(reset)" : "\(green)✓ Safe Operating Zone\(reset)")")
+        print("   \(bullet) CPU Speed Limit:  \(speedColor)\(report.cpu.speedLimitPercent)%\(reset) \(report.cpu.speedLimitPercent == 100 ? "\(tick) Full Speed" : "\(warn) Throttled")")
+        print("   \(bullet) Thermal State:    \(report.cpu.thermalWarning ? "\(red)\(warn) Warning Recorded\(reset)" : "\(green)\(tick) Safe Operating Zone\(reset)")")
 
         // 6. Memory & Virtual Memory Pressure
         print("\n\(bold)6. Memory & Virtual Memory Pressure\(reset)")
-        print("   • Physical Memory:  \(Int(report.memory.totalPhysicalGB)) GB")
-        print("   • Free RAM:         \(String(format: "%.2f", report.memory.freeGB)) GB")
-        print("   • Swap Used:        \(Int(report.memory.swapUsedMB)) MB")
-        print("   • Pages Throttled:  \(report.memory.pagesThrottled == 0 ? "\(green)0 Pages (Zero Thrashing)\(reset)" : "\(red)\(report.memory.pagesThrottled) Pages\(reset)")")
+        print("   \(bullet) Physical Memory:  \(Int(report.memory.totalPhysicalGB)) GB")
+        print("   \(bullet) Free RAM:         \(String(format: "%.2f", report.memory.freeGB)) GB")
+        print("   \(bullet) Swap Used:        \(Int(report.memory.swapUsedMB)) MB")
+        print("   \(bullet) Pages Throttled:  \(report.memory.pagesThrottled == 0 ? "\(green)0 Pages (Zero Thrashing)\(reset)" : "\(red)\(report.memory.pagesThrottled) Pages\(reset)")")
 
         // 7. Disk & Xcode Readiness
         print("\n\(bold)7. Xcode & Compilation Readiness\(reset)")
-        print("   • Free Disk Space:  \(green)\(Int(report.disk.freeGB)) GB free\(reset) (\(Int(report.disk.percentFree))% available)")
+        print("   \(bullet) Free Disk Space:  \(green)\(Int(report.disk.freeGB)) GB free\(reset) (\(Int(report.disk.percentFree))% available)")
         if report.xcodeReadiness.isReady {
-            print("   • Readiness Status: \(green)\(bold)✓ READY FOR HEAVY WORKLOADS & COMPILATION\(reset)")
+            print("   \(bullet) Readiness Status: \(green)\(bold)\(tick) READY FOR HEAVY WORKLOADS & COMPILATION\(reset)")
         } else {
-            print("   • Readiness Status: \(yellow)\(bold)▲ CAUTION BEFORE HEAVY BUILDS\(reset)")
+            print("   \(bullet) Readiness Status: \(yellow)\(bold)\(warn) CAUTION BEFORE HEAVY BUILDS\(reset)")
             for rec in report.xcodeReadiness.recommendations {
-                print("     ↳ \(yellow)\(rec)\(reset)")
+                print("     \(arrow) \(yellow)\(rec)\(reset)")
             }
         }
-        print("\(cyan)────────────────────────────────────────────────────────────\(reset)\n")
+        print(rule() + "\n")
     }
 }

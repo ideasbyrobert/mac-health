@@ -10,8 +10,8 @@ into "twenty `.gpuRestart` reports name your AMD Radeon Pro 5300M on the VMPT
 channel, and then the watchdog fired." An optional background sentinel is also
 included; see the honest caveat on it below.
 
-It also ships an **energy lab** — a CLI, a SwiftUI app, and a set of real worker
-processes — for understanding where a machine's energy goes and why. Its
+It also ships an **energy lab** — a CLI and a set of real worker processes —
+for understanding where a machine's energy goes and why. Its
 founding observation is that CPU percentage cannot tell a deadlocked process
 from a healthy idle one; on this machine the two read 0.00% and 0.02%. Energy
 signature can. See [docs/energy-lab.md](docs/energy-lab.md).
@@ -107,13 +107,6 @@ For a process the lab did not spawn there is no progress heartbeat, so `energy
 watch` will say `indeterminate` rather than guess between a deadlock and a
 healthy wait. That refusal is the point, not a limitation to work around.
 
-The SwiftUI app renders the same claims, with a hand-drawn wait-for graph and an
-energy-flow diagram:
-
-```bash
-make app && open "dist/Energy Lab.app"
-```
-
 ### 3. Resource Governance
 ```bash
 # One-shot scan and non-destructive pacing of background workloads
@@ -177,9 +170,9 @@ The package splits into a library and a thin executable:
   an observer can tell forward progress from its absence.
 - **`MacHealthCLI`** — argument handling and exit codes, and nothing else.
   It produces the `mac-health` binary.
-- **`EnergyLabApp`** — the SwiftUI window. `make app` wraps it in a real bundle
-  with `chaos-worker` inside, because SwiftPM alone emits a bare executable
-  with no bundle identity.
+- **`Render`** — one presentation layer for the whole tool. `TerminalCapabilities`
+  decides once whether the stream can carry colour, box drawing, and how wide it
+  is, so no renderer has to think about escape codes.
 
 ---
 
@@ -194,7 +187,6 @@ make test           # run the test suite
 make install        # install to $PREFIX/bin (PREFIX defaults to ~/.local)
 make uninstall      # remove it again
 make lab            # build, then run every chaos scenario
-make app            # bundle the SwiftUI app into dist/Energy Lab.app
 make notarized      # Developer ID-signed, notarized, stapled DMG in dist/
 make clean
 ```

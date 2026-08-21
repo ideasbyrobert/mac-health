@@ -44,11 +44,11 @@ public struct ProactiveSentinel {
         setvbuf(stdout, nil, _IOLBF, 0)
         if verbose {
             print("\n\(ConsoleFormat.bold)🛡️ mac-health Proactive Sentinel Daemon Active\(ConsoleFormat.reset)")
-            print("\(ConsoleFormat.cyan)────────────────────────────────────────────────────────────\(ConsoleFormat.reset)")
-            print("  • Heartbeat Interval:  \(intervalSec) seconds")
-            print("  • Proactive Monitors:  WindowServer IPC, GPU Watchdog, Thermal Headroom, Swap Thrashing")
-            print("  • Auto-Healing:        Dynamic QoS Pacing, Priority Shedding, Sleep Timings")
-            print("\(ConsoleFormat.cyan)────────────────────────────────────────────────────────────\(ConsoleFormat.reset)\n")
+            print(ConsoleFormat.rule())
+            print("  \(ConsoleFormat.bullet) Heartbeat Interval:  \(intervalSec) seconds")
+            print("  \(ConsoleFormat.bullet) Proactive Monitors:  WindowServer IPC, GPU Watchdog, Thermal Headroom, Swap Thrashing")
+            print("  \(ConsoleFormat.bullet) Auto-Healing:        Dynamic QoS Pacing, Priority Shedding, Sleep Timings")
+            print(ConsoleFormat.rule() + "\n")
             print("Sentinel is actively guarding the system. Press Ctrl+C to stop.\n")
         }
 
@@ -81,12 +81,12 @@ public struct ProactiveSentinel {
                 let timestamp = ConsoleFormat.timeString(Date())
                 switch action {
                 case .reportSpike(let latency, let spikeStreak):
-                    print("[\(timestamp)] \(ConsoleFormat.red)⚠ WindowServer Latency Spike: \(String(format: "%.1f", latency))ms (Streak: \(spikeStreak))\(ConsoleFormat.reset)")
-                    print("  ↳ Proactively shedding CPU contention and pacing heavy background processes...")
+                    print("[\(timestamp)] \(ConsoleFormat.red)\(ConsoleFormat.warn) WindowServer Latency Spike: \(String(format: "%.1f", latency))ms (Streak: \(spikeStreak))\(ConsoleFormat.reset)")
+                    print("  \(ConsoleFormat.arrow) Proactively shedding CPU contention and pacing heavy background processes...")
                 case .reportRecovery(let latency):
-                    print("[\(timestamp)] \(ConsoleFormat.green)✓ WindowServer Recovered: \(String(format: "%.1f", latency))ms latency (Normal)\(ConsoleFormat.reset)")
+                    print("[\(timestamp)] \(ConsoleFormat.green)\(ConsoleFormat.tick) WindowServer Recovered: \(String(format: "%.1f", latency))ms latency (Normal)\(ConsoleFormat.reset)")
                 case .reportThermal(let reason):
-                    print("[\(timestamp)] \(ConsoleFormat.yellow)▲ Thermal Event (\(reason)) → Auto-pacing heavy compilers & agents...\(ConsoleFormat.reset)")
+                    print("[\(timestamp)] \(ConsoleFormat.yellow)\(ConsoleFormat.warn) Thermal Event (\(reason)) → Auto-pacing heavy compilers & agents...\(ConsoleFormat.reset)")
                 case .paceAll:
                     governor.paceAll(verbose: false)
                 }
@@ -142,17 +142,17 @@ public struct ProactiveSentinel {
             shell.run("\(prefix)launchctl bootout gui/\(uid) '\(agentPlistPath)' 2>/dev/null")
             let bootstrap = shell.run("\(prefix)launchctl bootstrap gui/\(uid) '\(agentPlistPath)'")
 
-            print("\n\(ConsoleFormat.green)✓ Proactive Sentinel LaunchAgent Installed Successfully!\(ConsoleFormat.reset)")
-            print("  • Plist Location:  \(agentPlistPath)")
-            print("  • Binary Path:     \(resolvedBinary)")
-            print("  • Service Target:  gui/\(uid) (\(consoleUser))")
+            print("\n\(ConsoleFormat.green)\(ConsoleFormat.tick) Proactive Sentinel LaunchAgent Installed Successfully!\(ConsoleFormat.reset)")
+            print("  \(ConsoleFormat.bullet) Plist Location:  \(agentPlistPath)")
+            print("  \(ConsoleFormat.bullet) Binary Path:     \(resolvedBinary)")
+            print("  \(ConsoleFormat.bullet) Service Target:  gui/\(uid) (\(consoleUser))")
             if bootstrap.exitCode == 0 {
-                print("  • Status:          Running in Background")
+                print("  \(ConsoleFormat.bullet) Status:          Running in Background")
             } else {
-                print("  • Status:          \(ConsoleFormat.yellow)Bootstrap failed — \(bootstrap.output)\(ConsoleFormat.reset)")
-                print("    ↳ If running over SSH, run: launchctl bootstrap gui/\(uid) '\(agentPlistPath)' from a GUI terminal session.")
+                print("  \(ConsoleFormat.bullet) Status:          \(ConsoleFormat.yellow)Bootstrap failed — \(bootstrap.output)\(ConsoleFormat.reset)")
+                print("    \(ConsoleFormat.arrow) If running over SSH, run: launchctl bootstrap gui/\(uid) '\(agentPlistPath)' from a GUI terminal session.")
             }
-            print("  • Logs:            /tmp/mac-health-sentinel.log\n")
+            print("  \(ConsoleFormat.bullet) Logs:            /tmp/mac-health-sentinel.log\n")
         } catch {
             print("\(ConsoleFormat.red)✗ Failed to write LaunchAgent plist: \(error.localizedDescription)\(ConsoleFormat.reset)")
         }
@@ -166,7 +166,7 @@ public struct ProactiveSentinel {
         try? FileManager.default.removeItem(atPath: legacyPlistPath)
         shell.run("pkill -f '[m]ac-health sentinel --daemon' 2>/dev/null")
         try? FileManager.default.removeItem(atPath: agentPlistPath)
-        print("\n\(ConsoleFormat.green)✓ Proactive Sentinel LaunchAgent Removed Successfully.\(ConsoleFormat.reset)\n")
+        print("\n\(ConsoleFormat.green)\(ConsoleFormat.tick) Proactive Sentinel LaunchAgent Removed Successfully.\(ConsoleFormat.reset)\n")
     }
 
     public static func statusLaunchAgent() {
@@ -178,14 +178,14 @@ public struct ProactiveSentinel {
             || FileManager.default.fileExists(atPath: legacyPlistPath)
 
         print("\n\(ConsoleFormat.bold)🛡️ mac-health Sentinel LaunchAgent Status\(ConsoleFormat.reset)")
-        print("\(ConsoleFormat.cyan)────────────────────────────────────────────────────────────\(ConsoleFormat.reset)")
-        print("  • Installed on Disk: \(exists ? "\(ConsoleFormat.green)Yes (\(agentPlistPath))\(ConsoleFormat.reset)" : "\(ConsoleFormat.yellow)No\(ConsoleFormat.reset)")")
+        print(ConsoleFormat.rule())
+        print("  \(ConsoleFormat.bullet) Installed on Disk: \(exists ? "\(ConsoleFormat.green)Yes (\(agentPlistPath))\(ConsoleFormat.reset)" : "\(ConsoleFormat.yellow)No\(ConsoleFormat.reset)")")
         let pids = psOut.components(separatedBy: .newlines).filter { !$0.isEmpty }
         if pids.isEmpty {
-            print("  • Service Status:    \(ConsoleFormat.yellow)Inactive / Stopped\(ConsoleFormat.reset)")
+            print("  \(ConsoleFormat.bullet) Service Status:    \(ConsoleFormat.yellow)Inactive / Stopped\(ConsoleFormat.reset)")
         } else {
-            print("  • Service Status:    \(ConsoleFormat.green)Active (PID: \(pids.joined(separator: ", ")))\(ConsoleFormat.reset)")
+            print("  \(ConsoleFormat.bullet) Service Status:    \(ConsoleFormat.green)Active (PID: \(pids.joined(separator: ", ")))\(ConsoleFormat.reset)")
         }
-        print("\(ConsoleFormat.cyan)────────────────────────────────────────────────────────────\(ConsoleFormat.reset)\n")
+        print(ConsoleFormat.rule() + "\n")
     }
 }

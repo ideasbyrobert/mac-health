@@ -1,4 +1,4 @@
-public let macHealthVersion = "1.2.0"
+public let macHealthVersion = "1.3.0"
 
 /// Version of the `--json` contract. Consumers should refuse a payload whose
 /// `schemaVersion` exceeds what they were written against. Adding a field is
