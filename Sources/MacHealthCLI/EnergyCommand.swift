@@ -41,7 +41,7 @@ enum EnergyCommand {
 
     static func listScenarios() {
         print("\n\(ConsoleFormat.bold)Chaos scenarios\(ConsoleFormat.reset)")
-        print("\(ConsoleFormat.cyan)────────────────────────────────────────────────────────────\(ConsoleFormat.reset)")
+        print(ConsoleFormat.rule())
         for scenario in Scenario.all {
             print("\n  \(ConsoleFormat.bold)\(scenario.id)\(ConsoleFormat.reset) — \(scenario.title)")
             print("    \(ConsoleFormat.cyan)predicts\(ConsoleFormat.reset) \(scenario.predicted.rawValue)")
@@ -107,7 +107,7 @@ enum EnergyCommand {
         }
 
         print("\n\(ConsoleFormat.bold)Energy lab\(ConsoleFormat.reset) — identical work, different coordination")
-        print("\(ConsoleFormat.cyan)────────────────────────────────────────────────────────────\(ConsoleFormat.reset)")
+        print(ConsoleFormat.rule())
         print("Every worker below completes the same nominal job. Any difference in")
         print("the counters is caused purely by how that work is coordinated.")
 
@@ -128,7 +128,7 @@ enum EnergyCommand {
 
     static func summarise(_ results: [ScenarioResult]) {
         guard !results.isEmpty else { return }
-        print("\n\(ConsoleFormat.cyan)────────────────────────────────────────────────────────────\(ConsoleFormat.reset)")
+        print("\n" + ConsoleFormat.rule())
         print("\(ConsoleFormat.bold)  Cost of coordination, for identical work\(ConsoleFormat.reset)\n")
         func pad(_ text: String, _ width: Int, right: Bool = false) -> String {
             let gap = max(width - text.count, 0)
@@ -194,7 +194,7 @@ enum EnergyCommand {
         }
 
         print("\n\(ConsoleFormat.bold)Where the energy is going\(ConsoleFormat.reset)  (\(String(format: "%.1f", report.window))s window)")
-        print("\(ConsoleFormat.cyan)────────────────────────────────────────────────────────────\(ConsoleFormat.reset)")
+        print(ConsoleFormat.rule())
 
         func pad(_ t: String, _ w: Int, right: Bool = false) -> String {
             let gap = max(w - t.count, 0)
